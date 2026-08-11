@@ -24,7 +24,7 @@
     "@devvit/web": "0.14.0",
     "@types/node": "22.20.1",
     "devvit": "0.14.0",
-    "esbuild": "0.28.1",
+    "esbuild": "0.28.2",
     "typescript": "7.0.2"
   },
   "engines": {
