@@ -10,6 +10,11 @@
     }
   },
   "server": {},
+  "permissions": {
+    "http": {
+      "domains": ["tiles.openfreemap.org", "places.googleapis.com"]
+    }
+  },
   "menu": {
     "items": [
       {

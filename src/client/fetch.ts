@@ -1,3 +1,4 @@
+import {AJAXError, addProtocol} from 'maplibre-gl'
 import {
   type AddPinReq,
   type AddPinRsp,
@@ -30,6 +31,58 @@ export async function fetchDeletePin(
   req: DeletePinReq,
 ): Promise<DeletePinRsp | undefined> {
   return fetchJson(Endpoint.DeletePin, req)
+}
+
+/**
+ * The scheme external URLs are rewritten to. Any scheme but http(s) makes
+ * MapLibre defer the request to the handler registered by
+ * {@link installProxyProtocol} rather than fetching it itself, and a worker that
+ * doesn't recognize the scheme forwards the request to the main thread. That
+ * detour is the point: MapLibre loads tiles and glyphs from a Web Worker, and
+ * only the main thread's `fetch` carries the app's auth token, so a request made
+ * from the worker comes back 401.
+ */
+const proxyScheme = 'mapproxy'
+
+/**
+ * Rewrites an external URL to the proxy scheme, since Reddit apps may only make
+ * external requests from the server. Local URLs (`data:`, `blob:`, same-origin)
+ * are left alone, signalled as `undefined`.
+ */
+export function proxyExternalUrl(url: string): {url: string} | undefined {
+  if (!/^https?:\/\//i.test(url)) return
+  if (new URL(url).origin === location.origin) return
+  return {url: url.replace(/^https?:/i, `${proxyScheme}:`)}
+}
+
+/**
+ * Teaches MapLibre to load {@link proxyScheme} URLs through the server's proxy.
+ * MapLibre only ever calls this on the main thread, which is what makes it work.
+ */
+export function installProxyProtocol(): void {
+  addProtocol(proxyScheme, async (req, abort) => {
+    const url = req.url.replace(new RegExp(`^${proxyScheme}:`, 'i'), 'https:')
+    const rsp = await fetch(
+      `${Endpoint.Proxy}?url=${encodeURIComponent(url)}`,
+      {signal: abort.signal, headers: req.headers},
+    )
+    // MapLibre reads the status off this error; a 404 tile means empty, not broken.
+    if (!rsp.ok) {
+      throw new AJAXError(rsp.status, rsp.statusText, req.url, await rsp.blob())
+    }
+
+    let data: unknown
+    if (req.type === 'json') data = await rsp.json()
+    else if (req.type === 'string') data = await rsp.text()
+    else data = await rsp.arrayBuffer()
+
+    return {
+      data,
+      cacheControl: rsp.headers.get('Cache-Control'),
+      expires: rsp.headers.get('Expires'),
+      etag: rsp.headers.get('ETag') ?? undefined,
+    }
+  })
 }
 
 export type SearchPlacesResult =

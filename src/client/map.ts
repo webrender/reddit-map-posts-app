@@ -3,7 +3,7 @@ import {
   MapLibreMap,
   Marker,
   NavigationControl,
-  type Subscription,
+  setWorkerUrl,
 } from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import type {
@@ -19,7 +19,20 @@ import {
   fetchGetMap,
   fetchSearchPlaces,
   fetchUpdatePin,
+  installProxyProtocol,
+  proxyExternalUrl,
 } from './fetch.ts'
+import {
+  filterPins,
+  initSidebar,
+  isNarrowViewport,
+  isSidebarOpen,
+  renderSidebar,
+  resolveSelection,
+  scrollPinIntoView,
+  setSelectedCard,
+  setSidebarOpen,
+} from './sidebar.ts'
 
 const searchInput = document.getElementById('search-input') as HTMLInputElement
 const searchResultsList = document.getElementById(
@@ -59,15 +72,17 @@ const pinRemoveImageBtn = document.getElementById(
 const pinDeleteBtn = document.getElementById('pin-delete') as HTMLButtonElement
 const pinCancelBtn = document.getElementById('pin-cancel') as HTMLButtonElement
 
-const viewDialog = document.getElementById('view-dialog') as HTMLDialogElement
-const viewTitle = document.getElementById('view-title') as HTMLHeadingElement
-const viewCategory = document.getElementById('view-category') as HTMLSpanElement
-const viewImage = document.getElementById('view-image') as HTMLImageElement
-const viewDescription = document.getElementById(
-  'view-description',
-) as HTMLParagraphElement
-const viewLink = document.getElementById('view-link') as HTMLAnchorElement
-const viewCloseBtn = document.getElementById('view-close') as HTMLButtonElement
+/** MapLibre's default marker colour, restated so selection can swap it. */
+const markerColor = '#3fb1ce'
+const selectedMarkerColor = '#e11d48'
+
+/**
+ * How a Pin came to be selected. Selection itself is shared state, but each
+ * origin drives a different side effect — that is what keeps a Map click from
+ * yanking the Map's zoom, and a Pin Card click from re-scrolling the list the
+ * user just clicked in.
+ */
+type SelectSource = 'card' | 'marker' | 'new' | 'drag'
 
 let map: MapLibreMap
 let isOwner = false
@@ -75,28 +90,45 @@ let pins: Pin[] = []
 const markers = new Map<string, Marker>()
 
 let activeCategory = ''
+let selectedPinId: string | undefined
 let editingPinId: string | undefined
 let editingLocation: LatLng | undefined
 let pendingImageDataUrl: string | undefined
 let removeImage = false
 let pendingMarker: Marker | undefined
-let editingDragSubscription: Subscription | undefined
 let droppingPin = false
 let searchDebounce: ReturnType<typeof setTimeout> | undefined
 let searchToken = 0
 
 async function init(): Promise<void> {
+  // MapLibre parses tiles in a Web Worker it loads from a separate file. Left to
+  // itself it looks for that file next to its own module URL, which after
+  // bundling is this script's, so it is built into public/ alongside this one
+  // (see build:worker) and pointed at by name here.
+  setWorkerUrl(new URL('maplibre-gl-worker.js', import.meta.url).href)
+  installProxyProtocol()
+
   map = new MapLibreMap({
     container: 'map',
     style: 'https://tiles.openfreemap.org/styles/bright',
     center: [0, 20],
     zoom: 1.5,
+    // Style, sprite, glyph, and tile URLs are all external; each one is
+    // rewritten here so it is fetched through the server, which is the only
+    // place a Reddit app may make external requests from.
+    transformRequest: proxyExternalUrl,
   })
+  // The Sidebar takes the left edge, so the zoom controls keep the right.
   map.addControl(new NavigationControl())
   map.on('click', ev => {
-    if (!droppingPin) return
-    stopDroppingPin()
-    openNewPinDialog({lat: ev.lngLat.lat, lng: ev.lngLat.lng})
+    if (droppingPin) {
+      stopDroppingPin()
+      openNewPinDialog({lat: ev.lngLat.lat, lng: ev.lngLat.lng})
+      return
+    }
+    // Light-dismiss: where the Sidebar overlays the Map, the exposed strip of
+    // Map is the quickest way to get the rest of it back.
+    if (isNarrowViewport() && isSidebarOpen()) setSidebarOpen(false)
   })
 
   const data = await fetchGetMap()
@@ -106,35 +138,162 @@ async function init(): Promise<void> {
   pins = data.pins
   document.body.classList.toggle('viewer-mode', !isOwner)
 
+  initSidebar({
+    onSelectCard: pinId => togglePin(pinId, 'card'),
+    onEditPin: pinId => {
+      const pin = pins.find(candidate => candidate.id === pinId)
+      if (pin) openEditDialog(pin)
+    },
+    onToggle: () => map.resize(),
+  })
+
   renderCategoryOptions()
-  renderMarkers()
+  render()
+  // Open where there is room for a column and something to list; a narrow
+  // viewport or an empty Map both start collapsed.
+  setSidebarOpen(!isNarrowViewport() && pins.length > 0)
   fitToPins()
   wireEvents()
 }
 
-function fitToPins(): void {
-  if (!pins.length) return
-  const bounds = new LngLatBounds()
-  for (const pin of pins) bounds.extend([pin.location.lng, pin.location.lat])
-  map.fitBounds(bounds, {padding: 60, maxZoom: 14, duration: 0})
+function render(): void {
+  const visible = filterPins(pins, activeCategory)
+  const previouslySelected = selectedPinId
+  selectedPinId = resolveSelection(selectedPinId, visible)
+  renderMarkers(visible)
+  renderSidebar({
+    pins: visible,
+    selectedPinId,
+    isOwner,
+    filtered: !!activeCategory,
+  })
+  // Losing the Selected Pin to a filter or a deletion lands in the same place
+  // as letting go of it deliberately: the whole Map.
+  if (previouslySelected && !selectedPinId) fitToPins(true)
 }
 
-function renderMarkers(): void {
+/**
+ * Frames every Pin currently shown, which is what the Map loads with and what
+ * it returns to whenever nothing is selected.
+ */
+function fitToPins(animate: boolean = false): void {
+  const visible = filterPins(pins, activeCategory)
+  if (!visible.length) return
+  const bounds = new LngLatBounds()
+  for (const pin of visible) bounds.extend([pin.location.lng, pin.location.lat])
+  map.fitBounds(bounds, {padding: 60, maxZoom: 14, duration: animate ? 600 : 0})
+}
+
+function renderMarkers(visible: Pin[]): void {
   for (const marker of markers.values()) marker.remove()
   markers.clear()
+  for (const pin of visible) markers.set(pin.id, createMarker(pin))
+}
 
-  for (const pin of pins) {
-    if (activeCategory && pin.category !== activeCategory) continue
-    const marker = new Marker()
-      .setLngLat([pin.location.lng, pin.location.lat])
-      .addTo(map)
-    marker.getElement().style.cursor = 'pointer'
-    marker.getElement().addEventListener('click', ev => {
-      ev.stopPropagation()
-      openPin(pin)
-    })
-    markers.set(pin.id, marker)
+function createMarker(pin: Pin): Marker {
+  const selected = pin.id === selectedPinId
+  const marker = new Marker({
+    color: selected ? selectedMarkerColor : markerColor,
+    // Only the Selected Pin can be moved, so an off-target tap on any other
+    // marker can never drag a Pin somewhere by accident.
+    draggable: selected && isOwner,
+  })
+    .setLngLat([pin.location.lng, pin.location.lat])
+    .addTo(map)
+
+  const element = marker.getElement()
+  element.style.cursor = 'pointer'
+  // Markers crowd together at the zoom a Pin Card flies to; the selected one
+  // has to stay on top of its neighbours to be worth highlighting.
+  if (selected) element.style.zIndex = '1'
+
+  let dragged = false
+  marker.on('dragstart', () => {
+    dragged = true
+  })
+  marker.on('dragend', () => {
+    void movePin(pin.id, marker)
+    // Releasing a drag also fires a click; let that one land first.
+    setTimeout(() => {
+      dragged = false
+    }, 0)
+  })
+  element.addEventListener('click', ev => {
+    ev.stopPropagation()
+    if (dragged) return
+    togglePin(pin.id, 'marker')
+  })
+
+  return marker
+}
+
+function refreshMarker(pinId: string): void {
+  const existing = markers.get(pinId)
+  if (!existing) return
+  existing.remove()
+  const pin = pins.find(candidate => candidate.id === pinId)
+  if (pin) markers.set(pinId, createMarker(pin))
+  else markers.delete(pinId)
+}
+
+function selectPin(pinId: string | undefined, source: SelectSource): void {
+  const previousId = selectedPinId
+  selectedPinId = pinId
+  // Only the two markers whose appearance changed are rebuilt; the rest of the
+  // Map is left alone.
+  if (previousId && previousId !== pinId) refreshMarker(previousId)
+  if (pinId) refreshMarker(pinId)
+  setSelectedCard(pinId)
+
+  if (!pinId) {
+    if (previousId) fitToPins(true)
+    return
   }
+
+  const pin = pins.find(candidate => candidate.id === pinId)
+  if (!pin) return
+  switch (source) {
+    case 'card':
+      map.flyTo({center: [pin.location.lng, pin.location.lat], zoom: 15})
+      break
+    case 'marker':
+    case 'new':
+      setSidebarOpen(true)
+      scrollPinIntoView(pin.id)
+      break
+    case 'drag':
+      break
+  }
+}
+
+/**
+ * Selecting the Selected Pin again lets go of it, from either the Pin Card or
+ * the marker, so there is always a way back out to the whole Map.
+ */
+function togglePin(pinId: string, source: SelectSource): void {
+  selectPin(pinId === selectedPinId ? undefined : pinId, source)
+}
+
+/**
+ * Writes a dragged Pin's new location straight away, putting the marker back
+ * where it came from if the write fails.
+ */
+async function movePin(pinId: string, marker: Marker): Promise<void> {
+  const pin = pins.find(candidate => candidate.id === pinId)
+  if (!pin) return
+
+  const previousLocation = pin.location
+  const lngLat = marker.getLngLat()
+  pin.location = {lat: lngLat.lat, lng: lngLat.lng}
+
+  const rsp = await fetchUpdatePin({id: pinId, location: pin.location})
+  if (rsp) {
+    pin.location = rsp.pin.location
+    return
+  }
+  pin.location = previousLocation
+  marker.setLngLat([previousLocation.lng, previousLocation.lat])
+  searchStatus.textContent = 'Could not move pin.'
 }
 
 function renderCategoryOptions(): void {
@@ -162,32 +321,8 @@ function renderCategoryOptions(): void {
   categoryFilterSelect.hidden = categories.length === 0
 }
 
-function openPin(pin: Pin): void {
-  if (isOwner) openEditDialog(pin)
-  else openViewDialog(pin)
-}
-
-function openViewDialog(pin: Pin): void {
-  viewTitle.textContent = pin.title
-
-  viewCategory.hidden = !pin.category
-  viewCategory.textContent = pin.category ?? ''
-
-  viewImage.hidden = !pin.imageUrl
-  if (pin.imageUrl) viewImage.src = pin.imageUrl
-
-  viewDescription.hidden = !pin.description
-  viewDescription.textContent = pin.description ?? ''
-
-  viewLink.hidden = !pin.link
-  if (pin.link) viewLink.href = pin.link
-
-  viewDialog.showModal()
-}
-
 function openEditDialog(pin: Pin): void {
   editingPinId = pin.id
-  editingLocation = pin.location
   pendingImageDataUrl = undefined
   removeImage = false
 
@@ -201,15 +336,6 @@ function openEditDialog(pin: Pin): void {
   if (pin.imageUrl) pinImagePreview.src = pin.imageUrl
   pinRemoveImageBtn.hidden = !pin.imageUrl
   pinDeleteBtn.hidden = false
-
-  const marker = markers.get(pin.id)
-  if (marker) {
-    marker.setDraggable(true)
-    editingDragSubscription = marker.on('dragend', () => {
-      const lngLat = marker.getLngLat()
-      editingLocation = {lat: lngLat.lat, lng: lngLat.lng}
-    })
-  }
 
   pinDialog.showModal()
 }
@@ -226,6 +352,8 @@ function openNewPinDialog(location: LatLng): void {
   pinRemoveImageBtn.hidden = true
   pinDeleteBtn.hidden = true
 
+  // A dropped Pin isn't a Pin until it is saved, so it has a marker but no Pin
+  // Card until then.
   pendingMarker = new Marker({color: '#888'})
     .setLngLat([location.lng, location.lat])
     .addTo(map)
@@ -235,9 +363,6 @@ function openNewPinDialog(location: LatLng): void {
 }
 
 function closePinDialog(): void {
-  if (editingPinId) markers.get(editingPinId)?.setDraggable(false)
-  editingDragSubscription?.unsubscribe()
-  editingDragSubscription = undefined
   pendingMarker?.remove()
   pendingMarker = undefined
   editingPinId = undefined
@@ -250,19 +375,19 @@ function closePinDialog(): void {
 
 async function savePin(): Promise<void> {
   const title = pinTitleInput.value.trim()
-  if (!title || !editingLocation) return
+  if (!title) return
   const category = pinCategoryInput.value.trim()
   const description = pinDescriptionInput.value.trim()
   const link = pinLinkInput.value.trim()
 
   if (editingPinId) {
+    // No location: a Pin is moved by dragging its marker, never by this form.
     const req: UpdatePinReq = {
       id: editingPinId,
       title,
       category,
       description,
       link,
-      location: editingLocation,
     }
     if (pendingImageDataUrl) req.imageDataUrl = pendingImageDataUrl
     else if (removeImage) req.removeImage = true
@@ -271,21 +396,33 @@ async function savePin(): Promise<void> {
     if (!rsp) return
     const index = pins.findIndex(pin => pin.id === editingPinId)
     if (index !== -1) pins[index] = rsp.pin
-  } else {
-    const req: AddPinReq = {location: editingLocation, title}
-    if (category) req.category = category
-    if (description) req.description = description
-    if (link) req.link = link
-    if (pendingImageDataUrl) req.imageDataUrl = pendingImageDataUrl
 
-    const rsp = await fetchAddPin(req)
-    if (!rsp) return
-    pins.push(rsp.pin)
+    const savedId = rsp.pin.id
+    renderCategoryOptions()
+    render()
+    closePinDialog()
+    // A changed Category moves the Pin Card to another group; follow it there
+    // rather than leaving the reader looking at the gap it left.
+    scrollPinIntoView(savedId)
+    return
   }
 
+  if (!editingLocation) return
+  const req: AddPinReq = {location: editingLocation, title}
+  if (category) req.category = category
+  if (description) req.description = description
+  if (link) req.link = link
+  if (pendingImageDataUrl) req.imageDataUrl = pendingImageDataUrl
+
+  const rsp = await fetchAddPin(req)
+  if (!rsp) return
+  pins.push(rsp.pin)
+
+  const addedId = rsp.pin.id
   renderCategoryOptions()
-  renderMarkers()
+  render()
   closePinDialog()
+  selectPin(addedId, 'new')
 }
 
 async function deleteEditingPin(): Promise<void> {
@@ -294,7 +431,8 @@ async function deleteEditingPin(): Promise<void> {
   if (!rsp) return
   pins = pins.filter(pin => pin.id !== editingPinId)
   renderCategoryOptions()
-  renderMarkers()
+  // A deleted Pin can't stay selected; render() drops it.
+  render()
   closePinDialog()
 }
 
@@ -357,12 +495,20 @@ async function selectSearchResult(result: PlaceResult): Promise<void> {
   }
   pins.push(rsp.pin)
   renderCategoryOptions()
-  renderMarkers()
+  render()
   map.easeTo({center: [result.location.lng, result.location.lat], duration: 0})
+  selectPin(rsp.pin.id, 'new')
   openEditDialog(rsp.pin)
 }
 
 function wireEvents(): void {
+  categoryFilterSelect.addEventListener('change', () => {
+    activeCategory = categoryFilterSelect.value
+    // A Selected Pin the filter excludes stops being selected; render() sorts
+    // that out for both views at once.
+    render()
+  })
+
   if (!isOwner) return
 
   manualPinBtn.addEventListener('click', () => {
@@ -385,11 +531,6 @@ function wireEvents(): void {
       return
     }
     searchDebounce = setTimeout(() => void runSearch(query), 300)
-  })
-
-  categoryFilterSelect.addEventListener('change', () => {
-    activeCategory = categoryFilterSelect.value
-    renderMarkers()
   })
 
   pinImageInput.addEventListener('change', () => {
@@ -419,7 +560,5 @@ function wireEvents(): void {
   pinCancelBtn.addEventListener('click', () => closePinDialog())
   pinDeleteBtn.addEventListener('click', () => void deleteEditingPin())
 }
-
-viewCloseBtn.addEventListener('click', () => viewDialog.close())
 
 void init()

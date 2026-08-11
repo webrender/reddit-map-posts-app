@@ -46,6 +46,11 @@ const originalFetch = globalThis.fetch
 let requestUserId: T2 = OWNER
 let placesApiKey: string | undefined = 'test-api-key'
 let submittedPostTitle: string | undefined
+/** Every external URL the server fetched, with the headers it forwarded. */
+let upstreamReqs: {url: string; headers: Headers}[] = []
+
+const TILE_BYTES = Uint8Array.from([0x1a, 0x00, 0xff, 0x80, 0x0a])
+const TILE_ETAG = '"tile-v1"'
 
 before(async () => {
   redis.get = async key => redisValues.get(key)
@@ -104,6 +109,32 @@ before(async () => {
         {status: 200, headers: {'Content-Type': 'application/json'}},
       )
     }
+
+    const {host, pathname} = new URL(`${url}`)
+    if (host === 'tiles.openfreemap.org') {
+      const headers = new Headers(init?.headers)
+      upstreamReqs.push({url: `${url}`, headers})
+
+      if (pathname === '/missing.pbf') return new Response('', {status: 404})
+      if (headers.get('if-none-match') === TILE_ETAG) {
+        return new Response(undefined, {
+          status: 304,
+          headers: {ETag: TILE_ETAG},
+        })
+      }
+      return new Response(TILE_BYTES, {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/x-protobuf',
+          // fetch() decodes the body, so the proxy must not re-advertise this.
+          'Content-Encoding': 'gzip',
+          'Cache-Control': 'public, max-age=86400',
+          ETag: TILE_ETAG,
+          'Set-Cookie': 'upstream=1',
+        },
+      })
+    }
+
     return originalFetch(url, init)
   }) as typeof fetch
 
@@ -148,6 +179,7 @@ beforeEach(() => {
   requestUserId = OWNER
   placesApiKey = 'test-api-key'
   submittedPostTitle = undefined
+  upstreamReqs = []
 })
 
 function seedMap(map: MapData): void {
@@ -505,6 +537,113 @@ test('update pin: rejects a non-http(s) link', async () => {
   const req: UpdatePinReq = {id: 'p1', link: "javascript:alert('x')"}
   const rsp = await postJson(Endpoint.UpdatePin, req)
   assert.equal(rsp.status, 400)
+})
+
+function proxyFetch(
+  externalUrl: string,
+  init?: RequestInit,
+): Promise<Response> {
+  return fetch(
+    `${serverURL}/${Endpoint.Proxy}?url=${encodeURIComponent(externalUrl)}`,
+    init,
+  )
+}
+
+test('proxy: forwards an allowlisted host, body bytes intact', async () => {
+  const rsp = await proxyFetch(
+    'https://tiles.openfreemap.org/planet/14/8000/5000.pbf',
+  )
+  assert.equal(rsp.status, 200)
+  assert.deepEqual(
+    new Uint8Array(await rsp.arrayBuffer()),
+    new Uint8Array(TILE_BYTES),
+  )
+  assert.equal(rsp.headers.get('content-type'), 'application/x-protobuf')
+  assert.equal(rsp.headers.get('content-length'), `${TILE_BYTES.length}`)
+  assert.equal(
+    upstreamReqs[0]?.url,
+    'https://tiles.openfreemap.org/planet/14/8000/5000.pbf',
+  )
+})
+
+test('proxy: forwards caching headers but not hop-by-hop or upstream cookies', async () => {
+  const rsp = await proxyFetch('https://tiles.openfreemap.org/styles/bright')
+  await rsp.arrayBuffer()
+  assert.equal(rsp.headers.get('cache-control'), 'public, max-age=86400')
+  assert.equal(rsp.headers.get('etag'), TILE_ETAG)
+  assert.equal(rsp.headers.get('content-encoding'), null)
+  assert.equal(rsp.headers.get('set-cookie'), null)
+})
+
+test('proxy: relays a conditional request and its 304', async () => {
+  const rsp = await proxyFetch(
+    'https://tiles.openfreemap.org/planet/14/8000/5000.pbf',
+    {headers: {'If-None-Match': TILE_ETAG}},
+  )
+  assert.equal(rsp.status, 304)
+  assert.equal(await rsp.text(), '')
+  assert.equal(upstreamReqs[0]?.headers.get('if-none-match'), TILE_ETAG)
+})
+
+test('proxy: passes an upstream 404 through so MapLibre sees the empty tile', async () => {
+  const rsp = await proxyFetch('https://tiles.openfreemap.org/missing.pbf')
+  assert.equal(rsp.status, 404)
+})
+
+test('proxy: 403 for a host that is not allowlisted', async () => {
+  const rsp = await proxyFetch('https://evil.example.com/secret')
+  assert.equal(rsp.status, 403)
+  const body = (await rsp.json()) as ErrorRsp
+  assert.equal(body.error, 'host not allowed: evil.example.com')
+  assert.deepEqual(upstreamReqs, [])
+})
+
+test('proxy: 403 for a host that only looks allowlisted', async () => {
+  for (const url of [
+    'https://tiles.openfreemap.org.evil.example.com/x',
+    'https://evil.example.com/?x=tiles.openfreemap.org',
+    'https://sub.tiles.openfreemap.org/x',
+  ]) {
+    const rsp = await proxyFetch(url)
+    assert.equal(rsp.status, 403, url)
+    await rsp.body?.cancel()
+  }
+  assert.deepEqual(upstreamReqs, [])
+})
+
+test('proxy: 400 for a non-https URL', async () => {
+  for (const url of [
+    'http://tiles.openfreemap.org/styles/bright',
+    'file:///etc/passwd',
+    'not-a-url',
+    '/api/map',
+  ]) {
+    const rsp = await proxyFetch(url)
+    assert.equal(rsp.status, 400, url)
+    await rsp.body?.cancel()
+  }
+  assert.deepEqual(upstreamReqs, [])
+})
+
+test('proxy: 400 for a URL carrying credentials', async () => {
+  const rsp = await proxyFetch('https://user:pw@tiles.openfreemap.org/x')
+  assert.equal(rsp.status, 400)
+  assert.deepEqual(upstreamReqs, [])
+})
+
+test('proxy: 400 when the url parameter is missing', async () => {
+  const rsp = await fetch(`${serverURL}/${Endpoint.Proxy}`)
+  assert.equal(rsp.status, 400)
+  const body = (await rsp.json()) as ErrorRsp
+  assert.equal(body.error, 'url is required')
+})
+
+test('proxy: 404 for a non-GET request', async () => {
+  const rsp = await proxyFetch('https://tiles.openfreemap.org/styles/bright', {
+    method: 'POST',
+  })
+  assert.equal(rsp.status, 404)
+  assert.deepEqual(upstreamReqs, [])
 })
 
 test('internal server errors do not leak the stack trace to the client', async () => {

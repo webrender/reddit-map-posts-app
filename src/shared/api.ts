@@ -52,6 +52,8 @@ export const Endpoint = {
   UpdatePin: 'api/pin/update',
   DeletePin: 'api/pin/delete',
   SearchPlaces: 'api/places/search',
+  /** `?url=` an allowlisted external URL; the server fetches and forwards it. */
+  Proxy: 'api/proxy',
   OnAppInstall: 'internal/on/app/install',
   OnMenuNewPost: 'internal/on/menu/new-post',
 } as const
@@ -62,6 +64,7 @@ export const EndpointMethod = {
   [Endpoint.UpdatePin]: 'POST',
   [Endpoint.DeletePin]: 'POST',
   [Endpoint.SearchPlaces]: 'GET',
+  [Endpoint.Proxy]: 'GET',
   [Endpoint.OnAppInstall]: 'POST',
   [Endpoint.OnMenuNewPost]: 'POST',
 } as const satisfies {[endpoint: string]: 'GET' | 'POST'}

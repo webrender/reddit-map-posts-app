@@ -5,8 +5,9 @@
   "license": "BSD-3-Clause",
   "type": "module",
   "scripts": {
-    "build": "npm run build:client -- --metafile=dist/client.meta.json --minify && npm run build:server -- --metafile=dist/server.meta.json --minify",
+    "build": "npm run build:client -- --metafile=dist/client.meta.json --minify && npm run build:worker -- --minify && npm run build:server -- --metafile=dist/server.meta.json --minify",
     "build:client": "esbuild --bundle --log-level=warning --sourcemap=linked --target=es2023 --format=esm --outdir=public --platform=browser src/client/map.ts",
+    "build:worker": "esbuild --bundle --log-level=warning --sourcemap=linked --target=es2023 --format=esm --outfile=public/maplibre-gl-worker.js --platform=browser node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs",
     "build:server": "esbuild --bundle --log-level=warning --sourcemap=linked --target=es2023 --format=cjs --outdir=dist/server --platform=node src/server/index.ts",
     "clean": "rm -rf dist/ public/*.js*",
     "format": "npm run lint -- --fix",
@@ -16,7 +17,7 @@
     "test:types": "tsc --build",
     "test:unit": "node --experimental-strip-types --no-warnings=ExperimentalWarning --test src/**/*.test.ts",
     "publish": "npm run clean && npm run build && devvit publish",
-    "watch": "sh -c 'trap \"kill 0\" exit; npm run build:client -- --watch=forever& npm run build:server -- --watch=forever& wait' --"
+    "watch": "npm run build:worker && sh -c 'trap \"kill 0\" exit; npm run build:client -- --watch=forever& npm run build:server -- --watch=forever& wait' --"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.5",

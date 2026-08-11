@@ -31,6 +31,7 @@ import {
 } from './db.ts'
 import {HttpError} from './http-error.ts'
 import {searchPlaces} from './places.ts'
+import {proxyGet} from './proxy.ts'
 
 type AnyRsp =
   | GetMapRsp
@@ -73,6 +74,13 @@ async function route(
   const url = new URL(reqMsg.url ?? '/', 'http://localhost')
   const endpoint = url.pathname.slice(1) as Endpoint
   const method = EndpointMethod[endpoint]
+
+  // The only route whose response isn't JSON: it forwards bytes verbatim.
+  if (endpoint === Endpoint.Proxy && method === reqMsg.method) {
+    const proxied = await proxyGet(url.searchParams.get('url'), reqMsg.headers)
+    writeBytes(proxied.status, proxied.headers, proxied.body, rspMsg)
+    return
+  }
 
   let rsp: AnyRsp
   if (method !== reqMsg.method) {
@@ -253,6 +261,20 @@ async function readJson<T>(reqMsg: IncomingMessage): Promise<T> {
   reqMsg.on('data', chunk => chunks.push(chunk))
   await once(reqMsg, 'end')
   return JSON.parse(`${Buffer.concat(chunks)}`)
+}
+
+function writeBytes(
+  status: number,
+  headers: Readonly<{[name: string]: string}>,
+  body: Buffer,
+  rsp: ServerResponse,
+): void {
+  const noBody = status === 304
+  rsp.writeHead(
+    status,
+    noBody ? headers : {...headers, 'Content-Length': body.byteLength},
+  )
+  rsp.end(noBody ? undefined : body)
 }
 
 function writeJson<T extends PartialJsonValue>(
