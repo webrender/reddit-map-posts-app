@@ -91,7 +91,7 @@ These terms may be updated. Material changes will be reflected in the effective 
 
 ## 13. Governing law
 
-These terms are governed by the laws of `[JURISDICTION]`, without regard to its conflict-of-law rules. Nothing in this section deprives you of the protection of mandatory consumer-protection law in your place of residence.
+These terms are governed by the laws of the State of Hawaii, United States, without regard to its conflict-of-law rules. The state and federal courts located in Hawaii shall have jurisdiction over any dispute arising out of or relating to the app. Nothing in this section deprives you of the protection of mandatory consumer-protection law in your place of residence.
 
 ## 14. Source code
 
@@ -99,4 +99,4 @@ The app's source code is published at https://github.com/webrender/reddit-map-po
 
 ## 15. Contact
 
-`[CONTACT EMAIL]`, or https://github.com/webrender/reddit-map-posts-app/issues for anything that is not private.
+webrender+devvit@gmail.com, or https://github.com/webrender/reddit-map-posts-app/issues for anything that is not private.

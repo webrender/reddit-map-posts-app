@@ -77,6 +77,6 @@ If this policy changes materially, the effective date above will be updated and 
 
 ## Contact
 
-Questions about this policy, or requests concerning data associated with a map: `[CONTACT EMAIL]`.
+Questions about this policy, or requests concerning data associated with a map: webrender+devvit@gmail.com.
 
 Issues may also be raised at https://github.com/webrender/reddit-map-posts-app/issues — but please do not include private information in a public issue.
