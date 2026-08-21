@@ -4,12 +4,14 @@ import {
   type AddPinRsp,
   type DeletePinReq,
   type DeletePinRsp,
+  type DeletePostRsp,
   Endpoint,
   type GetMapRsp,
   type PlaceResult,
   type UpdatePinReq,
   type UpdatePinRsp,
 } from '../shared/api.ts'
+import {fetchJson} from './json.ts'
 
 export async function fetchGetMap(): Promise<GetMapRsp | undefined> {
   return fetchJson(Endpoint.GetMap)
@@ -31,6 +33,11 @@ export async function fetchDeletePin(
   req: DeletePinReq,
 ): Promise<DeletePinRsp | undefined> {
   return fetchJson(Endpoint.DeletePin, req)
+}
+
+/** Takes no arguments: the Post to delete is the one this page is running in. */
+export async function fetchDeletePost(): Promise<DeletePostRsp | undefined> {
+  return fetchJson(Endpoint.DeletePost, {})
 }
 
 /**
@@ -114,37 +121,4 @@ export async function fetchSearchPlaces(
 
   const body = (await rsp.json()) as {results: PlaceResult[]}
   return {ok: true, results: body.results}
-}
-
-async function fetchJson<T>(
-  path: string,
-  body?: unknown,
-): Promise<T | undefined> {
-  let rsp: Response
-  try {
-    rsp = await fetch(
-      path,
-      body === undefined
-        ? {headers: {Accept: 'application/json'}}
-        : {
-            method: 'POST',
-            headers: {
-              Accept: 'application/json',
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(body),
-          },
-    )
-  } catch (err) {
-    console.error(`HTTP error: ${err instanceof Error ? err.message : err}`)
-    return
-  }
-
-  if (!rsp.ok) {
-    const text = await rsp.text().catch(() => '')
-    console.error(`HTTP status ${rsp.status}: ${rsp.statusText}; ${text}`)
-    return
-  }
-
-  return (await rsp.json()) as T
 }

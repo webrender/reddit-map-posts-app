@@ -19,7 +19,22 @@
       width: 100dvw;
       height: 100dvh;
       overflow: hidden;
+      /* Nothing inside the Post scrolls, and saying so keeps the host from
+         waiting on a touch to find out. */
+      overscroll-behavior: none;
       font-family: system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      -webkit-tap-highlight-color: transparent;
+    }
+    /* ...except a Preview, which must chain its refusal to nobody: an inline
+       Post that swallows a drag swallows the feed's scroll with it, which is
+       the one thing it may never do. The root element is what the viewport
+       takes this from, hence reaching it through the body's class. See
+       ADR-0007. */
+    html:has(body.preview),
+    body.preview {
+      overscroll-behavior: auto;
     }
     #app {
       display: grid;
@@ -31,80 +46,295 @@
       width: 100%;
       height: 100%;
     }
+    /* The Preview is the Map and one button: everything else the toolbar opens
+       — the Sidebar, the dialog, the status line — is unreachable rather than
+       hidden, since nothing inline can reach it. The button floats over the Map
+       rather than claiming a row of its own, so the Map fills the Preview the
+       same way it fills full screen. */
+    body.preview #app {
+      grid-template-rows: 1fr;
+      grid-template-areas: 'map';
+    }
     #toolbar {
       grid-area: toolbar;
+      padding: 0.5rem;
+      background: var(--bg);
+      border-bottom: 1px solid var(--border);
+    }
+    body.preview #toolbar {
+      display: none;
+    }
+    /* The three faces of the toolbar: the controls, the add-a-pin row, and the
+       category filter — each of the latter two taking the controls' place while
+       it is open. Only ever one of them is in the flow, and none of them wraps,
+       so the toolbar keeps its one-row height whichever is showing. */
+    #toolbar-main,
+    #toolbar-pin,
+    #toolbar-filter {
       display: flex;
       align-items: center;
       gap: 0.5rem;
-      padding: 0.5rem;
-      border-bottom: 1px solid #ddd;
-      flex-wrap: wrap;
+    }
+    /* Holds the Sidebar toggle at one end of the toolbar and the Map's own
+       controls at the other, now that no field sits between them. */
+    .toolbar-spacer {
+      flex: 1 1 auto;
+    }
+    button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.375rem;
+      min-height: var(--control-height);
+      padding: 0 0.875rem;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-pill);
+      background: var(--bg);
+      color: var(--text);
+      font: inherit;
+      font-size: 0.8125rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:hover {
+      background: var(--bg-hover);
+    }
+    :focus-visible {
+      outline: 2px solid var(--focus);
+      outline-offset: 2px;
     }
     #sidebar-toggle {
       flex: 0 0 auto;
-      padding: 0.4rem 0.75rem;
+      /* Square so the three rules sit centred in the pill. */
+      width: var(--control-height);
+      padding: 0;
     }
+    #sidebar-toggle svg {
+      width: 1.25rem;
+      height: 1.25rem;
+    }
+    /* Takes the slack the two buttons beside it leave, and — min-width: 0,
+       against the flex default of auto — gives its own back when there isn't
+       any, so the row still fits a narrow phone on one line. */
     #search-wrap {
       position: relative;
       flex: 1 1 auto;
-      min-width: 10rem;
+      min-width: 0;
     }
     #search-input,
     #category-filter {
       width: 100%;
-      padding: 0.4rem 0.5rem;
-      font-size: 0.9rem;
+      min-height: var(--control-height);
+      padding: 0 0.875rem;
+      border: 1px solid transparent;
+      border-radius: var(--radius-pill);
+      background: var(--bg-subtle);
+      color: var(--text);
+      font: inherit;
+      font-size: 0.8125rem;
     }
+    /* A notch smaller than the rest of the toolbar's type: the field shares its
+       row with a labelled button, and this is what keeps a place name readable
+       in what is left. */
+    #search-input {
+      padding: 0 0.75rem;
+      font-size: 0.75rem;
+    }
+    #search-input::placeholder {
+      color: var(--text-muted);
+    }
+    #search-input:focus,
+    #category-filter:focus {
+      border-color: var(--border-strong);
+      outline: none;
+    }
+    /* Hangs from the field's left edge and grows past its right one, as far as
+       the viewport allows: the field gave up its width to the row it now shares,
+       and a place name still needs a line to itself. */
     #search-results {
       position: absolute;
       z-index: 10;
-      top: 100%;
+      top: calc(100% + 0.25rem);
       left: 0;
-      right: 0;
+      min-width: 100%;
+      width: max-content;
+      max-width: calc(100dvw - 1rem);
       margin: 0;
-      padding: 0;
+      padding: 0.25rem;
       list-style: none;
-      background: white;
-      border: 1px solid #ddd;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      box-shadow: var(--shadow);
       max-height: 12rem;
       overflow-y: auto;
     }
     #search-results:empty {
       display: none;
-      border: none;
     }
     #search-results li {
-      padding: 0.4rem 0.5rem;
+      padding: 0.5rem 0.625rem;
+      border-radius: var(--radius-sm);
+      font-size: 0.8125rem;
       cursor: pointer;
     }
     #search-results li:hover {
-      background: #f0f0f0;
+      background: var(--bg-hover);
     }
-    #search-status {
-      font-size: 0.8rem;
-      color: #666;
+    /* "Searching…", "Search failed." and the like ride in the results list
+       rather than in the toolbar row, which has no width to spare: they are
+       what the reader is looking at the dropdown for. */
+    #search-results li.search-hint {
+      color: var(--text-muted);
+      cursor: default;
     }
+    #search-results li.search-hint:hover {
+      background: none;
+    }
+    /* Said explicitly because the `display` above outranks the user agent's
+       `[hidden]` rule, and hiding two of the three faces is the whole
+       mechanism. */
+    #toolbar-main[hidden],
+    #toolbar-pin[hidden],
+    #toolbar-filter[hidden] {
+      display: none;
+    }
+    /* Open, the filter is the whole toolbar: the select takes every pixel the
+       close button leaves, so long category names are readable on a phone. The
+       width is overridden because the rule it shares with the search field sets
+       100%, which here is a whole row on its own with the button wrapped below. */
     #category-filter {
-      flex: 0 0 auto;
-      max-width: 10rem;
+      flex: 1 1 auto;
+      width: auto;
+      min-width: 0;
     }
+    /* Square, the same shape as the Sidebar toggle holding the other end of the
+       toolbar. All of them carry an icon rather than a label so that a narrow
+       device still fits the whole row on one line. */
+    #add-pin-btn,
+    #delete-post-btn,
+    #filter-btn,
+    #fullscreen-btn,
+    #pin-close,
+    #filter-close {
+      flex: 0 0 auto;
+      width: var(--control-height);
+      padding: 0;
+    }
+    #add-pin-btn svg,
+    #delete-post-btn svg,
+    #filter-btn svg,
+    #fullscreen-btn svg,
+    #pin-close svg,
+    #filter-close svg {
+      width: 1.25rem;
+      height: 1.25rem;
+    }
+    /* The one labelled control in the toolbar: it names the add-path that has
+       no field of its own to explain it. Its text sets its width, so it never
+       gives any up to the search field beside it. */
     #manual-pin-btn {
       flex: 0 0 auto;
-      padding: 0.4rem 0.75rem;
+      padding: 0 0.75rem;
+      white-space: nowrap;
     }
-    #manual-pin-btn[aria-pressed='true'] {
-      background: #2563eb;
-      color: white;
+    /* Accented while it is doing something: dropping a pin, or — since the
+       filter's own control is hidden behind the icon — holding a filter that is
+       narrowing what the Map and the Sidebar show. */
+    #manual-pin-btn[aria-pressed='true'],
+    #filter-btn.filtering {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: var(--on-accent);
     }
-    .viewer-mode #search-wrap,
-    .viewer-mode #search-status,
-    .viewer-mode #manual-pin-btn {
+    #manual-pin-btn[aria-pressed='true']:hover,
+    #filter-btn.filtering:hover {
+      border-color: var(--accent-hover);
+      background: var(--accent-hover);
+    }
+    /* Both add-paths live behind this one button, so hiding it is all it takes
+       to leave a Viewer with a read-only toolbar. */
+    .viewer-mode #add-pin-btn {
+      display: none;
+    }
+    /* The only irreversible thing in the app, so it is the only control that
+       wears the danger colour — and it wears it only on hover, because a
+       toolbar that is red at rest reads as an error rather than an action. */
+    #delete-post-btn:hover {
+      border-color: var(--danger);
+      background: var(--danger);
+      color: var(--on-accent);
+    }
+    .viewer-mode #delete-post-btn {
       display: none;
     }
     #map {
       grid-area: map;
       width: 100%;
       height: 100%;
+      /* MapLibre already claims the gestures on its own canvas container; this
+         says the same thing one level up, so a touch that starts on the Map is
+         never a candidate for scrolling anything. */
+      touch-action: none;
+    }
+    /* A Preview claims neither: MapLibre wires up no handler, so it marks no
+       canvas, and the Map hands every touch that lands on it straight back to
+       the feed. */
+    body.preview #map {
+      touch-action: auto;
+    }
+    /* The one thing a Preview offers, in the accent that means "act" everywhere
+       else on the page. Floats over the Map rather than sitting in a section
+       below it, sized as a fraction of the view rather than full width so it
+       reads as a control on the Map instead of a bar under it, and capped so it
+       doesn't sprawl on a wide Post. */
+    #open-map-btn {
+      grid-area: map;
+      justify-self: center;
+      align-self: end;
+      z-index: 6;
+      /* Clear of MapLibre's attribution bar, which owns the bottom edge. */
+      margin: 0 0 2rem;
+      width: 60%;
+      max-width: 28.125rem;
+      min-height: 3rem;
+      border-color: var(--accent);
+      background: var(--accent);
+      color: var(--on-accent);
+      font-size: 1rem;
+      box-shadow: var(--shadow);
+    }
+    #open-map-btn:hover {
+      border-color: var(--accent-hover);
+      background: var(--accent-hover);
+    }
+    body:not(.preview) #open-map-btn {
+      display: none;
+    }
+    /* What the Map itself has to say — the instruction while a Pin is being
+       dropped, and the failures of the actions taken on the Map rather than in
+       the toolbar. It sits over the Map instead of in the toolbar because the
+       toolbar row is full, and because two of its three faces are hidden at any
+       moment while a message can arrive under any of them. */
+    #map-status {
+      grid-area: map;
+      align-self: end;
+      justify-self: center;
+      z-index: 6;
+      max-width: calc(100% - 2rem);
+      /* Clear of MapLibre's attribution bar, which owns the bottom edge. */
+      margin: 0 0 2rem;
+      padding: 0.4rem 0.75rem;
+      border-radius: var(--radius-pill);
+      background: var(--bg);
+      box-shadow: var(--shadow);
+      font-size: 0.75rem;
+      color: var(--text);
+      /* Advisory only: the Map underneath keeps every click and drag. */
+      pointer-events: none;
+    }
+    #map-status:empty {
+      display: none;
     }
     /* Narrow: the Sidebar overlays the Map from the left, leaving a strip of
     Map exposed to tap on to dismiss it. Wide (see the media query): it takes a
@@ -116,8 +346,9 @@
       width: 85%;
       height: 100%;
       overflow-y: auto;
-      background: white;
-      border-right: 1px solid #ddd;
+      overscroll-behavior: contain;
+      background: var(--bg);
+      border-right: 1px solid var(--border);
     }
     body:not(.sidebar-open) #sidebar {
       display: none;
@@ -143,8 +374,8 @@
     #pin-list-empty {
       padding: 1rem 0;
       margin: 0;
-      font-size: 0.85rem;
-      color: #666;
+      font-size: 0.8125rem;
+      color: var(--text-muted);
     }
     .pin-group-heading {
       position: sticky;
@@ -152,30 +383,33 @@
       z-index: 1;
       margin: 0 -0.5rem;
       padding: 0.5rem;
-      background: white;
-      font-size: 0.7rem;
-      font-weight: 600;
+      background: var(--bg);
+      font-size: 0.6875rem;
+      font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.04em;
-      color: #666;
+      color: var(--text-muted);
     }
     .pin-card {
       position: relative;
       margin-bottom: 0.5rem;
-      border: 1px solid #ddd;
-      border-radius: 0.5rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
       overflow: hidden;
-      background: white;
+      background: var(--bg-subtle);
       cursor: pointer;
     }
+    .pin-card:hover {
+      border-color: var(--border-strong);
+    }
     .pin-card:focus-visible {
-      outline: 2px solid #2563eb;
+      outline: 2px solid var(--focus);
       outline-offset: -2px;
     }
     .pin-card.selected {
-      outline: 2px solid #e11d48;
+      border-color: var(--accent);
+      outline: 1px solid var(--accent);
       outline-offset: -2px;
-      background: #fff1f2;
     }
     .pin-card-image {
       display: block;
@@ -188,25 +422,31 @@
     }
     .pin-card-title {
       margin: 0;
-      font-size: 0.95rem;
+      font-size: 0.875rem;
+      font-weight: 600;
     }
     .pin-card-category {
       display: inline-block;
       margin-top: 0.3rem;
-      padding: 0.1rem 0.5rem;
-      border-radius: 999px;
-      background: #eee;
-      font-size: 0.7rem;
+      padding: 0.125rem 0.5rem;
+      border-radius: var(--radius-pill);
+      background: var(--bg-hover);
+      font-size: 0.6875rem;
+      font-weight: 600;
+      color: var(--text-muted);
     }
     .pin-card-description {
       margin: 0.4rem 0 0;
-      font-size: 0.85rem;
+      font-size: 0.8125rem;
+      color: var(--text-muted);
       white-space: pre-wrap;
     }
     .pin-card-link {
       display: inline-block;
       margin-top: 0.4rem;
-      font-size: 0.85rem;
+      font-size: 0.8125rem;
+      font-weight: 600;
+      color: var(--focus);
     }
     .pin-card-actions {
       display: flex;
@@ -214,35 +454,54 @@
       padding: 0 0.5rem 0.5rem;
     }
     .pin-card-edit {
-      font-size: 0.8rem;
-      padding: 0.2rem 0.6rem;
+      min-height: 1.75rem;
+      padding: 0 0.75rem;
+      font-size: 0.75rem;
     }
     dialog {
-      border: none;
-      border-radius: 0.5rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
       padding: 1rem;
       max-width: 24rem;
       width: 90vw;
+      background: var(--bg);
+      color: var(--text);
     }
     dialog::backdrop {
-      background: rgb(0 0 0 / 40%);
+      background: rgb(0 0 0 / 60%);
+    }
+    #pin-dialog-title {
+      margin: 0 0 0.75rem;
+      font-size: 1rem;
     }
     #pin-form label {
       display: block;
       margin-bottom: 0.6rem;
-      font-size: 0.85rem;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--text-muted);
     }
     #pin-form input,
     #pin-form textarea {
+      display: block;
       width: 100%;
-      padding: 0.4rem;
-      margin-top: 0.2rem;
-      font-size: 0.9rem;
+      padding: 0.5rem 0.75rem;
+      margin-top: 0.25rem;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      background: var(--bg-subtle);
+      color: var(--text);
+      font: inherit;
+      font-size: 0.8125rem;
+    }
+    #pin-form textarea {
+      resize: vertical;
     }
     #pin-image-preview {
       max-width: 100%;
       max-height: 8rem;
       margin: 0.4rem 0;
+      border-radius: var(--radius-sm);
     }
     /* Scoped to :not([hidden]): an id selector setting `display` outranks the
        user agent's `[hidden] {display: none}`, which would otherwise keep a
@@ -256,44 +515,198 @@
       gap: 0.5rem;
       margin-top: 0.5rem;
     }
+    #pin-save {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: var(--on-accent);
+    }
+    #pin-save:hover {
+      border-color: var(--accent-hover);
+      background: var(--accent-hover);
+    }
     #pin-delete {
       margin-right: auto;
-      color: #b91c1c;
+      border-color: var(--danger);
+      color: var(--danger);
+    }
+    #pin-remove-image {
+      min-height: 1.75rem;
+      padding: 0 0.75rem;
+      font-size: 0.75rem;
+    }
+    /* MapLibre's own controls, brought in line with the rest. */
+    .maplibregl-ctrl-group {
+      border-radius: var(--radius-pill);
+      overflow: hidden;
+    }
+    /* A Pin's Title, riding inside its marker's own element so it follows the
+       marker everywhere — including through a drag — without a second marker to
+       keep in step. Absolute, so it hangs off the tip without changing the box
+       MapLibre positions; capped and clipped, so one long Title can't paper
+       over the Map or the markers either side of it. */
+    .pin-label {
+      position: absolute;
+      top: 100%;
+      left: 50%;
+      transform: translateX(-50%);
+      max-width: 8rem;
+      padding: 0.0625rem 0.375rem;
+      border-radius: var(--radius-pill);
+      background: var(--bg);
+      box-shadow: var(--shadow);
+      font-size: 0.6875rem;
+      font-weight: 600;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    /* Marked like the marker above it, so the Selected Pin reads as one thing. */
+    .pin-label.selected {
+      background: var(--accent);
+      color: var(--on-accent);
     }
     </style>
   </head>
   <body>
     <div id="app">
       <header id="toolbar">
-        <button
-          id="sidebar-toggle"
-          type="button"
-          aria-expanded="false"
-          aria-controls="sidebar"
-        >
-          Pins (0)
-        </button>
-        <div id="search-wrap">
-          <input
-            id="search-input"
-            type="text"
-            placeholder="Search for a place…"
-            autocomplete="off"
+        <div id="toolbar-main">
+          <button
+            id="sidebar-toggle"
+            type="button"
+            aria-expanded="false"
+            aria-controls="sidebar"
+            aria-label="Show pins"
           >
-          <ul id="search-results"></ul>
+            <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+              <path
+                d="M3 5.5h14M3 10h14M3 14.5h14"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.75"
+                stroke-linecap="round"
+              />
+            </svg>
+          </button>
+          <span class="toolbar-spacer"></span>
+          <button id="add-pin-btn" type="button" aria-label="Add a pin">
+            <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+              <path
+                d="M10 17.5c3.667-4.2 5.5-7.35 5.5-9.45a5.5 5.5 0 1 0-11 0c0 2.1 1.833 5.25 5.5 9.45Z"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.75"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M10 5.75v4.5M7.75 8h4.5"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.75"
+                stroke-linecap="round"
+              />
+            </svg>
+          </button>
+          <button
+            id="filter-btn"
+            type="button"
+            hidden
+            aria-label="Filter by category"
+          >
+            <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+              <path
+                d="M3 5h14l-5.25 6v5.25l-3.5-2V11L3 5Z"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.75"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
+          <button
+            id="delete-post-btn"
+            type="button"
+            hidden
+            aria-label="Delete this map"
+          >
+            <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+              <path
+                d="M4.5 6h11M8 6V4.25h4V6M6 6l.75 10.25h6.5L14 6M8.75 8.75v5M11.25 8.75v5"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.75"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
+          <button
+            id="fullscreen-btn"
+            type="button"
+            hidden
+            aria-label="Exit full screen"
+          >
+            <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+              <path
+                d="M3 7.5h4.5V3M17 7.5h-4.5V3M17 12.5h-4.5V17M3 12.5h4.5V17"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.75"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
         </div>
-        <span id="search-status"></span>
-        <button id="manual-pin-btn" type="button" aria-pressed="false">
-          Drop a Pin
-        </button>
-        <select id="category-filter">
-          <option value="">All categories</option>
-        </select>
+        <div id="toolbar-pin" hidden>
+          <div id="search-wrap">
+            <input
+              id="search-input"
+              type="text"
+              placeholder="Search places…"
+              autocomplete="off"
+            >
+            <ul id="search-results"></ul>
+          </div>
+          <button id="manual-pin-btn" type="button" aria-pressed="false">
+            Drop a Pin
+          </button>
+          <button id="pin-close" type="button" aria-label="Close add a pin">
+            <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+              <path
+                d="M5 5l10 10M15 5L5 15"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.75"
+                stroke-linecap="round"
+              />
+            </svg>
+          </button>
+        </div>
+        <div id="toolbar-filter" hidden>
+          <select id="category-filter" aria-label="Filter by category">
+            <option value="">All categories</option>
+          </select>
+          <button id="filter-close" type="button" aria-label="Close filter">
+            <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+              <path
+                d="M5 5l10 10M15 5L5 15"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.75"
+                stroke-linecap="round"
+              />
+            </svg>
+          </button>
+        </div>
       </header>
       <div id="map"></div>
+      <p id="map-status" role="status"></p>
       <aside id="sidebar" aria-label="Pins">
         <div id="pin-list"></div>
       </aside>
+      <button id="open-map-btn" type="button">Open Map</button>
     </div>
 
     <dialog id="pin-dialog">

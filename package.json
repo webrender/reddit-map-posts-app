@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "build": "npm run build:client -- --metafile=dist/client.meta.json --minify && npm run build:worker -- --minify && npm run build:server -- --metafile=dist/server.meta.json --minify",
-    "build:client": "esbuild --bundle --log-level=warning --sourcemap=linked --target=es2023 --format=esm --outdir=public --platform=browser src/client/map.ts",
+    "build:client": "esbuild --bundle --log-level=warning --sourcemap=linked --target=es2023 --format=esm --outdir=public --platform=browser src/client/map.ts src/client/map-index.ts",
     "build:worker": "esbuild --bundle --log-level=warning --sourcemap=linked --target=es2023 --format=esm --outfile=public/maplibre-gl-worker.js --platform=browser node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs",
     "build:server": "esbuild --bundle --log-level=warning --sourcemap=linked --target=es2023 --format=cjs --outdir=dist/server --platform=node src/server/index.ts",
     "clean": "rm -rf dist/ public/*.js*",

@@ -90,12 +90,25 @@ let listEl: HTMLElement
 let toggleEl: HTMLButtonElement
 let handlers: SidebarHandlers
 let open = false
+let pinCount = 0
 
 export function initSidebar(sidebarHandlers: SidebarHandlers): void {
   handlers = sidebarHandlers
   listEl = document.getElementById('pin-list') as HTMLElement
   toggleEl = document.getElementById('sidebar-toggle') as HTMLButtonElement
   toggleEl.addEventListener('click', () => setSidebarOpen(!open))
+  labelToggle()
+}
+
+/**
+ * The toggle is an icon, so what it does and how many Pins are behind it are
+ * only ever said in its accessible name — which has to be refreshed both when
+ * the Sidebar opens and when the list it counts changes.
+ */
+function labelToggle(): void {
+  const label = `${open ? 'Hide' : 'Show'} pins (${pinCount})`
+  toggleEl.setAttribute('aria-label', label)
+  toggleEl.title = label
 }
 
 /** Below this the Sidebar overlays the Map instead of taking a column of it. */
@@ -112,11 +125,13 @@ export function setSidebarOpen(next: boolean): void {
   open = next
   document.body.classList.toggle('sidebar-open', open)
   toggleEl.setAttribute('aria-expanded', String(open))
+  labelToggle()
   handlers.onToggle(open)
 }
 
 export function renderSidebar(state: SidebarState): void {
-  toggleEl.textContent = `Pins (${state.pins.length})`
+  pinCount = state.pins.length
+  labelToggle()
   listEl.replaceChildren()
 
   if (!state.pins.length) {

@@ -1,4 +1,13 @@
 import {
+  context,
+  exitExpandedMode,
+  getWebViewMode,
+  navigateTo,
+  requestExpandedMode,
+  showForm,
+  type WebViewMode,
+} from '@devvit/web/client'
+import {
   LngLatBounds,
   MapLibreMap,
   Marker,
@@ -6,16 +15,19 @@ import {
   setWorkerUrl,
 } from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
-import type {
-  AddPinReq,
-  LatLng,
-  Pin,
-  PlaceResult,
-  UpdatePinReq,
+import './theme.css'
+import {
+  type AddPinReq,
+  deletePostForm,
+  type LatLng,
+  type Pin,
+  type PlaceResult,
+  type UpdatePinReq,
 } from '../shared/api.ts'
 import {
   fetchAddPin,
   fetchDeletePin,
+  fetchDeletePost,
   fetchGetMap,
   fetchSearchPlaces,
   fetchUpdatePin,
@@ -38,9 +50,20 @@ const searchInput = document.getElementById('search-input') as HTMLInputElement
 const searchResultsList = document.getElementById(
   'search-results',
 ) as HTMLUListElement
-const searchStatus = document.getElementById('search-status') as HTMLSpanElement
+const mapStatus = document.getElementById('map-status') as HTMLParagraphElement
+const addPinBtn = document.getElementById('add-pin-btn') as HTMLButtonElement
 const manualPinBtn = document.getElementById(
   'manual-pin-btn',
+) as HTMLButtonElement
+const pinCloseBtn = document.getElementById('pin-close') as HTMLButtonElement
+const toolbarMain = document.getElementById('toolbar-main') as HTMLDivElement
+const toolbarPin = document.getElementById('toolbar-pin') as HTMLDivElement
+const toolbarFilter = document.getElementById(
+  'toolbar-filter',
+) as HTMLDivElement
+const filterBtn = document.getElementById('filter-btn') as HTMLButtonElement
+const filterCloseBtn = document.getElementById(
+  'filter-close',
 ) as HTMLButtonElement
 const categoryFilterSelect = document.getElementById(
   'category-filter',
@@ -48,6 +71,13 @@ const categoryFilterSelect = document.getElementById(
 const categoryOptionsDatalist = document.getElementById(
   'category-options',
 ) as HTMLDataListElement
+const deletePostBtn = document.getElementById(
+  'delete-post-btn',
+) as HTMLButtonElement
+const fullscreenBtn = document.getElementById(
+  'fullscreen-btn',
+) as HTMLButtonElement
+const openMapBtn = document.getElementById('open-map-btn') as HTMLButtonElement
 
 const pinDialog = document.getElementById('pin-dialog') as HTMLDialogElement
 const pinForm = document.getElementById('pin-form') as HTMLFormElement
@@ -74,7 +104,66 @@ const pinCancelBtn = document.getElementById('pin-cancel') as HTMLButtonElement
 
 /** MapLibre's default marker colour, restated so selection can swap it. */
 const markerColor = '#3fb1ce'
-const selectedMarkerColor = '#e11d48'
+/** Reddit's OrangeRed, the same accent the Sidebar marks a Selected Pin with. */
+const selectedMarkerColor = '#d93a00'
+
+/**
+ * The drawing buffer is `pixelRatio²` fragments per CSS pixel, and a phone
+ * reporting 3 makes the Map cost nine times what the same view costs at 1. That
+ * is paid on every frame of a pan, so the gesture ends up chasing the finger.
+ * Capping it trades a little sharpness on the densest screens for a frame rate
+ * that keeps up; 2 is still retina, and screens below it are untouched.
+ */
+const maxPixelRatio = 2
+
+/**
+ * Touch gestures MapLibre wires up alongside pinch-zoom and double-tap-zoom,
+ * neither of which has an option of its own, and both of which a Map this small
+ * fires by accident:
+ *
+ * - `tapDragZoom` reads a tap followed within 500ms by a one-finger drag
+ *   starting within 30px of it as *zoom*. It is registered ahead of the pan and
+ *   pinch handlers with no allow-list, so while it is active it blocks both:
+ *   the drag zooms by a full level and pans nothing at all, or — if the finger
+ *   goes sideways, since the gesture only reads vertical travel — moves nothing
+ *   whatsoever. Tapping the Map is a normal thing to do here, which is what
+ *   made "drag right after a tap" a gesture the reader hits constantly.
+ * - `tapZoom` reads a single two-finger tap as *zoom out one level*. A gentle
+ *   pinch, one where each finger travels less than that same 30px tolerance, is
+ *   indistinguishable from one — so a small pinch outwards zoomed a whole level
+ *   in the wrong direction.
+ *
+ * Both are reached by name because the options that would reach them are far
+ * too blunt: `touchZoomRotate: false` would take pinch-zoom with it (and the
+ * `touch-action` claim that depends on it — see ADR-0006), and
+ * `doubleClickZoom: false` would take desktop double-click zoom with it.
+ */
+const disabledGestureHandler = ['tapDragZoom', 'tapZoom'] as const
+
+/**
+ * The entrypoint full screen loads. Both readings of a Post are the same page,
+ * which asks at load which of the two it is — but that only happens on a real
+ * navigation, and Reddit resolves an entrypoint to a URL before deciding
+ * whether one is owed: two `devvit.json` entrypoints that name the same file
+ * resolve to the exact same URL, which is indistinguishable from asking for
+ * the page already loaded, so nothing reloads and the Map stays whichever
+ * reading it first opened as. `?mode=expanded` is what actually makes
+ * `expanded` a different URL from `default` — the query string is never read,
+ * it exists solely so the two entrypoints stop resolving to the same place.
+ */
+const expandedEntrypoint = 'expanded'
+
+/** Room left around the outermost Pins when the Map frames every one of them. */
+const fitPadding = 60
+
+/**
+ * The same for a Preview, which is a fraction of the height and has no toolbar
+ * or Sidebar to hold the Pins clear of.
+ */
+const previewFitPadding = 24
+
+/** How long a message that reports something that already happened stays up. */
+const flashStatusMs = 4000
 
 /**
  * How a Pin came to be selected. Selection itself is shared state, but each
@@ -84,7 +173,22 @@ const selectedMarkerColor = '#e11d48'
  */
 type SelectSource = 'card' | 'marker' | 'new' | 'drag'
 
+/**
+ * Which of the toolbar's three faces is showing. The two that aren't `main` are
+ * modes: they replace the controls rather than sitting beside them, because a
+ * field wide enough to be worth typing in leaves a narrow toolbar no room for
+ * the buttons.
+ */
+type ToolbarFace = 'main' | 'pin' | 'filter'
+
 let map: MapLibreMap
+/**
+ * Whether this is the Preview — the Post as it is read inline, where the feed
+ * owns every gesture and the Map is a still picture of itself. Decided once, at
+ * load, because Reddit builds a separate web view for each reading. See
+ * ADR-0007.
+ */
+let isPreview = false
 let isOwner = false
 let pins: Pin[] = []
 const markers = new Map<string, Marker>()
@@ -97,6 +201,8 @@ let pendingImageDataUrl: string | undefined
 let removeImage = false
 let pendingMarker: Marker | undefined
 let droppingPin = false
+let toolbarFace: ToolbarFace = 'main'
+let statusTimeout: ReturnType<typeof setTimeout> | undefined
 let searchDebounce: ReturnType<typeof setTimeout> | undefined
 let searchToken = 0
 
@@ -108,6 +214,9 @@ async function init(): Promise<void> {
   setWorkerUrl(new URL('maplibre-gl-worker.js', import.meta.url).href)
   installProxyProtocol()
 
+  isPreview = readWebViewMode() === 'inline'
+  document.body.classList.toggle('preview', isPreview)
+
   map = new MapLibreMap({
     container: 'map',
     style: 'https://tiles.openfreemap.org/styles/bright',
@@ -117,19 +226,22 @@ async function init(): Promise<void> {
     // rewritten here so it is fetched through the server, which is the only
     // place a Reddit app may make external requests from.
     transformRequest: proxyExternalUrl,
+    // A Map of Pins is read from directly overhead, so the camera keeps two
+    // degrees of freedom — where it looks and how close — and gives up the
+    // other three. See ADR-0006: on a phone the abandoned three are what a
+    // two-finger gesture kept landing on by accident.
+    maxPitch: 0,
+    pitchWithRotate: false,
+    rollEnabled: false,
+    dragRotate: false,
+    touchPitch: false,
+    // A Preview wires up no handler at all, which is both how it refuses to
+    // move and how it lets the feed scroll: with nothing to pan or pinch,
+    // MapLibre never claims `touch-action` over its canvas. See ADR-0007.
+    interactive: !isPreview,
+    pixelRatio: Math.min(window.devicePixelRatio || 1, maxPixelRatio),
   })
-  // The Sidebar takes the left edge, so the zoom controls keep the right.
-  map.addControl(new NavigationControl())
-  map.on('click', ev => {
-    if (droppingPin) {
-      stopDroppingPin()
-      openNewPinDialog({lat: ev.lngLat.lat, lng: ev.lngLat.lng})
-      return
-    }
-    // Light-dismiss: where the Sidebar overlays the Map, the exposed strip of
-    // Map is the quickest way to get the rest of it back.
-    if (isNarrowViewport() && isSidebarOpen()) setSidebarOpen(false)
-  })
+  if (!isPreview) wireMapGestures()
 
   const data = await fetchGetMap()
   if (!data) return
@@ -137,6 +249,19 @@ async function init(): Promise<void> {
   isOwner = data.isOwner
   pins = data.pins
   document.body.classList.toggle('viewer-mode', !isOwner)
+  // Hidden until the Map says whose it is, so a Viewer never sees it flicker
+  // past on the way to being hidden. The Preview has no toolbar at all.
+  deletePostBtn.hidden = isPreview || !isOwner
+
+  // A Preview is the markers and nothing else: no Pin Cards to build, no
+  // toolbar to fill in, and one button that leaves for the reading that has all
+  // three.
+  if (isPreview) {
+    renderMarkers(pins)
+    fitToPins()
+    wireOpenMap()
+    return
+  }
 
   initSidebar({
     onSelectCard: pinId => togglePin(pinId, 'card'),
@@ -154,6 +279,32 @@ async function init(): Promise<void> {
   setSidebarOpen(!isNarrowViewport() && pins.length > 0)
   fitToPins()
   wireEvents()
+}
+
+/** Everything the Map answers a gesture with, and so nothing a Preview does. */
+function wireMapGestures(): void {
+  // Pinch keeps zooming but stops rotating. Note this leaves the handler
+  // enabled: MapLibre only claims the browser's touch gestures — the
+  // `touch-action: none` that stops the host scrolling instead of panning —
+  // while both pinch-zoom and drag-pan are on, so turning pinch off wholesale
+  // would hand pinch back to the browser.
+  map.touchZoomRotate.disableRotation()
+  for (const name of disabledGestureHandler) {
+    map._handlers._handlersById[name]?.disable()
+  }
+  // The Sidebar takes the left edge, so the zoom controls keep the right. With
+  // nothing left to rotate, the compass would only ever point north.
+  map.addControl(new NavigationControl({showCompass: false}))
+  map.on('click', ev => {
+    if (droppingPin) {
+      stopDroppingPin()
+      openNewPinDialog({lat: ev.lngLat.lat, lng: ev.lngLat.lng})
+      return
+    }
+    // Light-dismiss: where the Sidebar overlays the Map, the exposed strip of
+    // Map is the quickest way to get the rest of it back.
+    if (isNarrowViewport() && isSidebarOpen()) setSidebarOpen(false)
+  })
 }
 
 function render(): void {
@@ -181,7 +332,11 @@ function fitToPins(animate: boolean = false): void {
   if (!visible.length) return
   const bounds = new LngLatBounds()
   for (const pin of visible) bounds.extend([pin.location.lng, pin.location.lat])
-  map.fitBounds(bounds, {padding: 60, maxZoom: 14, duration: animate ? 600 : 0})
+  map.fitBounds(bounds, {
+    padding: isPreview ? previewFitPadding : fitPadding,
+    maxZoom: 14,
+    duration: animate ? 600 : 0,
+  })
 }
 
 function renderMarkers(visible: Pin[]): void {
@@ -192,17 +347,31 @@ function renderMarkers(visible: Pin[]): void {
 
 function createMarker(pin: Pin): Marker {
   const selected = pin.id === selectedPinId
+  // Only the Selected Pin can be moved, so an off-target tap on any other
+  // marker can never drag a Pin somewhere by accident — and a Place Search Pin
+  // never can, since its Location is the place's rather than the Owner's.
+  const draggable = selected && isOwner && !pin.fromPlaceSearch
   const marker = new Marker({
     color: selected ? selectedMarkerColor : markerColor,
-    // Only the Selected Pin can be moved, so an off-target tap on any other
-    // marker can never drag a Pin somewhere by accident.
-    draggable: selected && isOwner,
+    draggable,
   })
     .setLngLat([pin.location.lng, pin.location.lat])
     .addTo(map)
 
   const element = marker.getElement()
-  element.style.cursor = 'pointer'
+  // The Title travels with the marker: a Map of unlabelled markers says where
+  // the Pins are but not which is which, and in a Preview the Sidebar that
+  // would otherwise say more isn't there to ask.
+  const label = document.createElement('span')
+  label.className = selected ? 'pin-label selected' : 'pin-label'
+  label.textContent = pin.title
+  element.appendChild(label)
+
+  // A Preview's markers have nothing to click and nothing to drag.
+  if (isPreview) return marker
+
+  // Only what can actually be grabbed says so; everything else stays a click.
+  element.style.cursor = draggable ? 'move' : 'pointer'
   // Markers crowd together at the zoom a Pin Card flies to; the selected one
   // has to stay on top of its neighbours to be worth highlighting.
   if (selected) element.style.zIndex = '1'
@@ -293,7 +462,7 @@ async function movePin(pinId: string, marker: Marker): Promise<void> {
   }
   pin.location = previousLocation
   marker.setLngLat([previousLocation.lng, previousLocation.lat])
-  searchStatus.textContent = 'Could not move pin.'
+  flashStatus('Could not move pin.')
 }
 
 function renderCategoryOptions(): void {
@@ -318,7 +487,57 @@ function renderCategoryOptions(): void {
     ? previousFilter
     : ''
   activeCategory = categoryFilterSelect.value
-  categoryFilterSelect.hidden = categories.length === 0
+  filterBtn.hidden = categories.length === 0
+  filterBtn.classList.toggle('filtering', !!activeCategory)
+  // Nothing left to filter by: the open face would be a lone "All categories"
+  // over a toolbar the reader can no longer reach. Only the filter face is
+  // dismissed — this runs after every save, and the add-a-pin face the save
+  // came from stays put for the next one.
+  if (filterBtn.hidden && toolbarFace === 'filter') setToolbarFace('main')
+}
+
+/**
+ * Shows one of the toolbar's faces in place of whichever is showing now. Only
+ * ever one of them is in the flow, so the toolbar keeps its one-row height.
+ */
+function setToolbarFace(face: ToolbarFace): void {
+  const previous = toolbarFace
+  if (face === previous) return
+  toolbarFace = face
+  toolbarMain.hidden = face !== 'main'
+  toolbarPin.hidden = face !== 'pin'
+  toolbarFilter.hidden = face !== 'filter'
+
+  // Leaving the add-a-pin face disarms the drop it armed: with the button that
+  // says so gone from the toolbar, a Map still waiting to be clicked has
+  // nothing left to explain itself.
+  if (previous === 'pin') stopDroppingPin()
+
+  // Focus follows the swap, so the keyboard lands on whatever replaced the
+  // control it was on rather than falling back to the top of the document.
+  if (face === 'pin') searchInput.focus()
+  else if (face === 'filter') categoryFilterSelect.focus()
+  else if (previous === 'pin' && !addPinBtn.hidden) addPinBtn.focus()
+  else if (previous === 'filter' && !filterBtn.hidden) filterBtn.focus()
+}
+
+/** Puts a message over the Map until something replaces or clears it. */
+function setStatus(text: string): void {
+  if (statusTimeout) clearTimeout(statusTimeout)
+  statusTimeout = undefined
+  mapStatus.textContent = text
+}
+
+/**
+ * Reports something that has already finished happening, which nothing later
+ * will clear — so it clears itself.
+ */
+function flashStatus(text: string): void {
+  setStatus(text)
+  statusTimeout = setTimeout(() => {
+    mapStatus.textContent = ''
+    statusTimeout = undefined
+  }, flashStatusMs)
 }
 
 function openEditDialog(pin: Pin): void {
@@ -445,19 +664,48 @@ function readImageAsDataUrl(file: File): Promise<string> {
   })
 }
 
+/**
+ * Arms the Manual Pin Drop: the next click on the Map is a Location rather than
+ * a selection. What the Map is waiting for is said over the Map itself, since
+ * the button holding the mode is a row away from where the click has to land.
+ */
+function startDroppingPin(): void {
+  droppingPin = true
+  manualPinBtn.setAttribute('aria-pressed', 'true')
+  document.getElementById('map')?.style.setProperty('cursor', 'crosshair')
+  setStatus('Click the map to place the pin.')
+}
+
 function stopDroppingPin(): void {
+  if (!droppingPin) return
   droppingPin = false
   manualPinBtn.setAttribute('aria-pressed', 'false')
-  manualPinBtn.textContent = 'Drop a Pin'
   document.getElementById('map')?.style.removeProperty('cursor')
+  setStatus('')
 }
 
 function clearSearchResults(): void {
   searchResultsList.innerHTML = ''
-  searchStatus.textContent = ''
+}
+
+/**
+ * Says what the search is doing where its results would be. The dropdown is the
+ * one place with room for a sentence, and it is where the reader is already
+ * looking once they have typed.
+ */
+function renderSearchHint(text: string): void {
+  searchResultsList.innerHTML = ''
+  const item = document.createElement('li')
+  item.className = 'search-hint'
+  item.textContent = text
+  searchResultsList.appendChild(item)
 }
 
 function renderSearchResults(results: PlaceResult[]): void {
+  if (!results.length) {
+    renderSearchHint('No places found.')
+    return
+  }
   searchResultsList.innerHTML = ''
   for (const result of results) {
     const item = document.createElement('li')
@@ -469,18 +717,18 @@ function renderSearchResults(results: PlaceResult[]): void {
 
 async function runSearch(query: string): Promise<void> {
   const token = ++searchToken
-  searchStatus.textContent = 'Searching…'
+  renderSearchHint('Searching…')
   const result = await fetchSearchPlaces(query)
   if (token !== searchToken) return // superseded by a newer search or a cleared input
 
   if (!result.ok) {
-    searchResultsList.innerHTML = ''
-    searchStatus.textContent = result.unavailable
-      ? 'Ask a moderator to set up place search for this subreddit.'
-      : 'Search failed.'
+    renderSearchHint(
+      result.unavailable
+        ? 'Ask a moderator to set up place search for this subreddit.'
+        : 'Search failed.',
+    )
     return
   }
-  searchStatus.textContent = ''
   renderSearchResults(result.results)
 }
 
@@ -488,9 +736,13 @@ async function selectSearchResult(result: PlaceResult): Promise<void> {
   searchToken++ // invalidate any in-flight search
   clearSearchResults()
   searchInput.value = ''
-  const rsp = await fetchAddPin({location: result.location, title: result.name})
+  const rsp = await fetchAddPin({
+    location: result.location,
+    title: result.name,
+    fromPlaceSearch: true,
+  })
   if (!rsp) {
-    searchStatus.textContent = 'Could not add pin.'
+    flashStatus('Could not add pin.')
     return
   }
   pins.push(rsp.pin)
@@ -501,9 +753,97 @@ async function selectSearchResult(result: PlaceResult): Promise<void> {
   openEditDialog(rsp.pin)
 }
 
+/**
+ * The web view's presentation mode, or nothing where the host doesn't answer
+ * for one. `devvit` is a global Reddit injects into the web view, so asking
+ * throws anywhere else — a plain browser, the local test harness — and there
+ * the full screen control is simply never offered.
+ */
+function readWebViewMode(): WebViewMode | undefined {
+  try {
+    return getWebViewMode()
+  } catch {
+    return
+  }
+}
+
+/**
+ * Runs one of the two mode changes. Both want the trusted click that triggered
+ * them, and both throw if the web view is already in the mode being asked for.
+ */
+function changeWebViewMode(change: () => void): void {
+  try {
+    change()
+  } catch (err) {
+    console.error(
+      `web view mode change failed; ${err instanceof Error ? err.message : err}`,
+    )
+  }
+}
+
+/**
+ * The Preview's one control, and the only way into the reading that has the
+ * rest of the interface.
+ */
+function wireOpenMap(): void {
+  openMapBtn.addEventListener('click', ev =>
+    changeWebViewMode(() => requestExpandedMode(ev, expandedEntrypoint)),
+  )
+}
+
+/**
+ * Full screen's one mode control: the way back out. It never has to offer the
+ * way in, since a web view reading itself as expanded is already there and a
+ * web view reading itself as inline is a Preview, whose Open Map button is the
+ * whole of its toolbar.
+ */
+/**
+ * The one action in the app that cannot be undone, so it asks first — through
+ * Reddit's own modal, whose Delete button is the confirmation.
+ *
+ * There is nowhere to return to afterwards: the Post this page is running
+ * inside has just been deleted, so it leaves for the subreddit rather than
+ * re-rendering a Map that no longer exists.
+ */
+function wireDeletePost(): void {
+  deletePostBtn.addEventListener('click', () => void confirmDeletePost())
+}
+
+async function confirmDeletePost(): Promise<void> {
+  const form = await showForm(deletePostForm())
+  if (form.action !== 'SUBMITTED') return
+
+  deletePostBtn.disabled = true
+  const rsp = await fetchDeletePost()
+  if (!rsp) {
+    deletePostBtn.disabled = false
+    flashStatus('The map could not be deleted.')
+    return
+  }
+  navigateTo(`https://www.reddit.com/r/${context.subredditName}`)
+}
+
+function wireExitFullscreen(): void {
+  if (readWebViewMode() !== 'expanded') return
+  fullscreenBtn.hidden = false
+  fullscreenBtn.addEventListener('click', ev =>
+    changeWebViewMode(() => exitExpandedMode(ev)),
+  )
+}
+
 function wireEvents(): void {
+  wireExitFullscreen()
+  wireDeletePost()
+
+  filterBtn.addEventListener('click', () => setToolbarFace('filter'))
+  filterCloseBtn.addEventListener('click', () => setToolbarFace('main'))
+  toolbarFilter.addEventListener('keydown', ev => {
+    if (ev.key === 'Escape') setToolbarFace('main')
+  })
+
   categoryFilterSelect.addEventListener('change', () => {
     activeCategory = categoryFilterSelect.value
+    filterBtn.classList.toggle('filtering', !!activeCategory)
     // A Selected Pin the filter excludes stops being selected; render() sorts
     // that out for both views at once.
     render()
@@ -511,15 +851,26 @@ function wireEvents(): void {
 
   if (!isOwner) return
 
+  // The button opens the face holding both add-paths; dropping a Pin is one of
+  // the two things offered there, rather than what the button itself does.
+  addPinBtn.addEventListener('click', () => setToolbarFace('pin'))
+  pinCloseBtn.addEventListener('click', () => setToolbarFace('main'))
+  toolbarPin.addEventListener('keydown', ev => {
+    if (ev.key !== 'Escape') return
+    // Armed, Escape disarms and leaves the face open: the reader is a click
+    // away from the Map, not done with adding a Pin.
+    if (droppingPin) stopDroppingPin()
+    else setToolbarFace('main')
+  })
+  // An armed drop is waiting on the Map, so it has to be cancellable from
+  // there too — by then the keyboard is nowhere near the toolbar.
+  document.addEventListener('keydown', ev => {
+    if (ev.key === 'Escape' && droppingPin) stopDroppingPin()
+  })
+
   manualPinBtn.addEventListener('click', () => {
-    if (droppingPin) {
-      stopDroppingPin()
-      return
-    }
-    droppingPin = true
-    manualPinBtn.setAttribute('aria-pressed', 'true')
-    manualPinBtn.textContent = 'Click the map…'
-    document.getElementById('map')?.style.setProperty('cursor', 'crosshair')
+    if (droppingPin) stopDroppingPin()
+    else startDroppingPin()
   })
 
   searchInput.addEventListener('input', () => {

@@ -1,6 +1,6 @@
 import {once} from 'node:events'
 import type {IncomingMessage, ServerResponse} from 'node:http'
-import {context, media, reddit, settings} from '@devvit/web/server'
+import {context, media, type Post, reddit} from '@devvit/web/server'
 import type {
   PartialJsonValue,
   T3,
@@ -10,13 +10,33 @@ import type {
 import {
   type AddPinReq,
   type AddPinRsp,
+  type CreateMapPostReq,
+  type CreateMapPostRsp,
+  type DeleteIndexPostRsp,
   type DeletePinReq,
   type DeletePinRsp,
+  type DeletePostRsp,
+  defaultIndexPostTitle,
+  defaultMapPostTitle,
   Endpoint,
   EndpointMethod,
   type ErrorRsp,
+  type GetIndexRsp,
   type GetMapRsp,
+  type IndexEntry,
+  IndexPageSize,
+  IndexPostFormName,
+  type IndexPostFormReq,
+  IndexSort,
+  indexPostForm,
+  isIndexSort,
+  NewPostFormName,
+  type NewPostFormReq,
+  newPostForm,
   type Pin,
+  PlacesKeyFormName,
+  type PlacesKeyFormReq,
+  PostTitleMaxLen,
   type SearchPlacesRsp,
   type UpdatePinReq,
   type UpdatePinRsp,
@@ -24,20 +44,47 @@ import {
 import {
   dbAddPin,
   dbCreateMap,
+  dbDeleteMap,
   dbDeletePin,
+  dbDeletePlacesApiKey,
+  dbGetIndex,
   dbGetMap,
+  dbGetPlacesApiKey,
+  dbGetScoreCursor,
+  dbIsMap,
+  dbSetCachedScores,
+  dbSetPlacesApiKey,
+  dbSetScoreCursor,
+  dbUnlistMap,
   dbUpdatePin,
+  type IndexRow,
   type MapData,
 } from './db.ts'
 import {HttpError} from './http-error.ts'
-import {searchPlaces} from './places.ts'
+import {checkPlacesApiKey, searchPlaces} from './places.ts'
 import {proxyGet} from './proxy.ts'
+
+/**
+ * The `post.entrypoints` key an Index Post renders. A Map Post takes the
+ * default; naming this one is the whole of what makes a second post type.
+ */
+const INDEX_ENTRYPOINT = 'index'
+
+/**
+ * How many cached scores one cron run refreshes. Bounded so the job's cost
+ * doesn't grow with the subreddit — see ADR-0011.
+ */
+const ScoreRefreshBatch = 300
 
 type AnyRsp =
   | GetMapRsp
+  | GetIndexRsp
+  | CreateMapPostRsp
   | AddPinRsp
   | UpdatePinRsp
   | DeletePinRsp
+  | DeletePostRsp
+  | DeleteIndexPostRsp
   | SearchPlacesRsp
   | UiResponse
   | TriggerResponse
@@ -102,11 +149,38 @@ async function route(
       case Endpoint.SearchPlaces:
         rsp = await routeSearchPlaces(url.searchParams)
         break
-      case Endpoint.OnMenuNewPost:
-        rsp = await routeMenuNewPost()
+      case Endpoint.GetIndex:
+        rsp = await routeGetIndex(url.searchParams)
         break
-      case Endpoint.OnAppInstall:
-        rsp = await routeAppInstall()
+      case Endpoint.CreateMapPost:
+        rsp = await routeCreateMapPost(reqMsg)
+        break
+      case Endpoint.DeletePost:
+        rsp = await routeDeletePost()
+        break
+      case Endpoint.DeleteIndexPost:
+        rsp = await routeDeleteIndexPost()
+        break
+      case Endpoint.OnMenuNewPost:
+        rsp = routeMenuNewPost()
+        break
+      case Endpoint.OnFormNewPost:
+        rsp = await routeFormNewPost(reqMsg)
+        break
+      case Endpoint.OnMenuNewIndexPost:
+        rsp = routeMenuNewIndexPost()
+        break
+      case Endpoint.OnFormNewIndexPost:
+        rsp = await routeFormNewIndexPost(reqMsg)
+        break
+      case Endpoint.OnMenuPlacesKey:
+        rsp = await routeMenuPlacesKey()
+        break
+      case Endpoint.OnFormPlacesKey:
+        rsp = await routeFormPlacesKey(reqMsg)
+        break
+      case Endpoint.OnTaskRefreshScores:
+        rsp = await routeRefreshScores()
         break
       default:
         rsp = {error: 'not found', status: 404}
@@ -138,6 +212,7 @@ async function routeAddPin(reqMsg: IncomingMessage): Promise<AddPinRsp> {
     location: req.location,
     title: normalizeTitle(req.title),
   }
+  if (req.fromPlaceSearch) pin.fromPlaceSearch = true
   if (req.category) pin.category = req.category
   if (req.description) pin.description = req.description
   if (req.link) pin.link = normalizeLink(req.link)
@@ -152,11 +227,19 @@ async function routeAddPin(reqMsg: IncomingMessage): Promise<AddPinRsp> {
 
 async function routeUpdatePin(reqMsg: IncomingMessage): Promise<UpdatePinRsp> {
   const t3 = requirePostId()
-  await requireOwnedMap(t3)
+  const map = await requireOwnedMap(t3)
   const req = await readJson<UpdatePinReq>(reqMsg)
 
   const patch: Partial<Pin> = {}
-  if (req.location !== undefined) patch.location = req.location
+  if (req.location !== undefined) {
+    // A Place Search Pin sits where the place is; only Manual Pin Drop Pins
+    // have a Location the Owner chose and may choose again.
+    const existing = map.pins.find(pin => pin.id === req.id)
+    if (existing?.fromPlaceSearch) {
+      throw new HttpError(400, 'a place search pin cannot be moved')
+    }
+    patch.location = req.location
+  }
   if (req.title !== undefined) patch.title = normalizeTitle(req.title)
   if (req.category !== undefined) patch.category = req.category || undefined
   if (req.description !== undefined)
@@ -189,7 +272,7 @@ async function routeSearchPlaces(
   const query = searchParams.get('q')?.trim()
   if (!query) return {results: []}
 
-  const apiKey = await settings.get<string>('placesApiKey')
+  const apiKey = await dbGetPlacesApiKey()
   if (!apiKey) {
     throw new HttpError(
       503,
@@ -200,26 +283,388 @@ async function routeSearchPlaces(
   return {results: await searchPlaces(query, apiKey)}
 }
 
-async function routeMenuNewPost(): Promise<UiResponse> {
-  const post = await createMapPost()
+/**
+ * The menu item doesn't create anything; it asks Reddit to show the form that
+ * does. Nothing exists yet at this point, so there is nothing to undo if the
+ * user cancels.
+ */
+function routeMenuNewPost(): UiResponse {
+  return {
+    showForm: {
+      name: NewPostFormName,
+      form: newPostForm(defaultMapPostTitle(context.username)),
+    },
+  }
+}
+
+async function routeFormNewPost(reqMsg: IncomingMessage): Promise<UiResponse> {
+  const req = await readJson<NewPostFormReq>(reqMsg)
+  // A rejected title is the user's to retype, not an error to log, so these
+  // answer 200 with a toast rather than throwing an HttpError.
+  const title = req.title?.trim()
+  if (!title) return {showToast: {text: 'A title is required.'}}
+  if (title.length > PostTitleMaxLen) {
+    return {
+      showToast: {
+        text: `A title can be at most ${PostTitleMaxLen} characters.`,
+      },
+    }
+  }
+
+  const post = await createMapPost(title)
   return {
     showToast: {text: `Post ${post.id} created.`, appearance: 'success'},
     navigateTo: post.url,
   }
 }
 
-async function routeAppInstall(): Promise<TriggerResponse> {
-  await createMapPost()
+/**
+ * The other half of the Index Post's list: making something to put on it. The
+ * form is the same object the menu item shows, because the client raises it
+ * through its own `showForm` and posts the answer back here.
+ */
+async function routeCreateMapPost(
+  reqMsg: IncomingMessage,
+): Promise<CreateMapPostRsp> {
+  const req = await readJson<CreateMapPostReq>(reqMsg)
+  const title = req.title?.trim()
+  if (!title) throw new HttpError(400, 'a title is required')
+  if (title.length > PostTitleMaxLen) {
+    throw new HttpError(
+      400,
+      `a title can be at most ${PostTitleMaxLen} characters`,
+    )
+  }
+  const post = await createMapPost(title)
+  return {url: post.url}
+}
+
+/**
+ * Deletes the Post this request came from, at its Owner's request. The Owner
+ * check is {@link requireOwnedMap}'s, the same one that guards every Pin
+ * mutation — a Viewer cannot delete a Map any more than they can move a Pin,
+ * and a moderator who wants one gone has Reddit's own tools.
+ *
+ * Reddit goes first. If it refuses, the Map is still there and still listed,
+ * which is the recoverable order to fail in; the reverse would leave a Post
+ * whose Map had already been erased under it.
+ */
+async function routeDeletePost(): Promise<DeletePostRsp> {
+  const t3 = requirePostId()
+  await requireOwnedMap(t3)
+  const post = await reddit.getPostById(t3)
+  await post.delete()
+  await dbDeleteMap(t3)
+  return {ok: true}
+}
+
+/**
+ * Deletes the Index Post this request came from, at a moderator's request. It
+ * is the mirror of {@link routeDeletePost} and fails in the same order, but the
+ * two guard different things: a Map Post belongs to its Owner, while an Index
+ * Post belongs to no one, so the subreddit's moderators are who may take one
+ * down.
+ *
+ * The post is checked for not being a Map before anything else. That is the
+ * only thing separating the two post types (ADR-0010), and without it this
+ * would be a way for a moderator to delete someone's Map — and its Pins with
+ * it — through a route that never looks at the Owner.
+ *
+ * Nothing in Redis is touched: an Index Post writes nothing and owns nothing,
+ * so the Maps it listed are whole and still listed for the next one.
+ */
+async function routeDeleteIndexPost(): Promise<DeleteIndexPostRsp> {
+  const t3 = requirePostId()
+  if (await dbIsMap(t3)) throw new HttpError(400, 'this post is not an index')
+  if (!(await isModerator())) throw new HttpError(403, 'not authorized')
+  const post = await reddit.getPostById(t3)
+  await post.delete()
+  return {ok: true}
+}
+
+/**
+ * Whether whoever is asking moderates this subreddit. Reddit is asked about
+ * this one user rather than for the whole mod list, so the answer costs the
+ * same on a subreddit with two moderators and one with two hundred.
+ *
+ * A Reddit that cannot be reached answers "no": the two things this gates are
+ * showing a delete button and honouring one, and neither is worth offering on
+ * a guess.
+ */
+async function isModerator(): Promise<boolean> {
+  const {subredditName, username} = context
+  if (!subredditName || !username) return false
+  try {
+    const mods = await reddit
+      .getModerators({subredditName, username, limit: 1})
+      .all()
+    return mods.length > 0
+  } catch (err) {
+    console.error(`could not read moderators of ${subredditName}; ${err}`)
+    return false
+  }
+}
+
+/** Moderator-only by way of `devvit.json`; nothing here re-checks it. */
+function routeMenuNewIndexPost(): UiResponse {
+  return {
+    showForm: {
+      name: IndexPostFormName,
+      form: indexPostForm(defaultIndexPostTitle(context.subredditName ?? '')),
+    },
+  }
+}
+
+async function routeFormNewIndexPost(
+  reqMsg: IncomingMessage,
+): Promise<UiResponse> {
+  const req = await readJson<IndexPostFormReq>(reqMsg)
+  const title = req.title?.trim()
+  if (!title) return {showToast: {text: 'A title is required.'}}
+  if (title.length > PostTitleMaxLen) {
+    return {
+      showToast: {
+        text: `A title can be at most ${PostTitleMaxLen} characters.`,
+      },
+    }
+  }
+
+  // Nothing is written to Redis for an Index Post: it holds no state of its
+  // own, which is why a subreddit may have any number of them and they all
+  // agree. Nor is it pinned — `sticky` may not be the app account's to call,
+  // and a silent failure teaches the moderator nothing.
+  const post = await reddit.submitCustomPost({title, entry: INDEX_ENTRYPOINT})
+  return {
+    showToast: {
+      text: 'Index post created. Pin it to the top of the subreddit to keep it there.',
+      appearance: 'success',
+    },
+    navigateTo: post.url,
+  }
+}
+
+/**
+ * One page of the Listing. The whole index is read and scanned on every
+ * request, which is the deal ADR-0010 struck: Devvit's Redis has no text index,
+ * so the scan happens somewhere, and doing it here keeps the response five
+ * Entries wide however large the subreddit gets.
+ */
+async function routeGetIndex(
+  searchParams: URLSearchParams,
+): Promise<GetIndexRsp> {
+  const sortParam = searchParams.get('sort')
+  const sort = isIndexSort(sortParam) ? sortParam : IndexSort.New
+  const query = (searchParams.get('q') ?? '').trim().toLowerCase()
+
+  const rows = (await dbGetIndex()).filter(
+    // A Map with no Pins has nothing to browse to; see ADR-0010.
+    row => row.pinCount > 0 && matchesQuery(row, query),
+  )
+  rows.sort((a, b) =>
+    sort === IndexSort.Top && a.score !== b.score
+      ? b.score - a.score
+      : b.createdAt - a.createdAt,
+  )
+
+  const pageCount = Math.max(1, Math.ceil(rows.length / IndexPageSize))
+  const requested = Math.floor(Number(searchParams.get('page')))
+  const page = Math.min(
+    Math.max(Number.isFinite(requested) ? requested : 1, 1),
+    pageCount,
+  )
+  const start = (page - 1) * IndexPageSize
+  const [entries, moderator] = await Promise.all([
+    liveEntries(rows.slice(start, start + IndexPageSize)),
+    isModerator(),
+  ])
+
+  return {entries, page, pageCount, total: rows.length, isModerator: moderator}
+}
+
+/**
+ * Asks Reddit about the Entries actually on screen, and only those: five reads
+ * is a bounded cost, and it answers two questions at once — what the score is
+ * now, and whether the post is still there (ADR-0011).
+ *
+ * A post that is gone is dropped from the index here, so a page may render
+ * short and be whole again on the next load. A post that is merely *removed* is
+ * hidden but kept, since a moderator can put it back. And if every read failed,
+ * Reddit is treated as unreachable rather than as having lost every post at
+ * once: nothing is unlisted, and the Entries render without a score.
+ */
+async function liveEntries(rows: readonly IndexRow[]): Promise<IndexEntry[]> {
+  if (!rows.length) return []
+
+  const fetched = await fetchPosts(rows)
+  if (fetched.every(({post}) => !post)) return rows.map(row => toEntry(row))
+
+  const entries: IndexEntry[] = []
+  for (const {row, post} of fetched) {
+    if (!post) {
+      await dbUnlistMap(row.t3)
+      continue
+    }
+    if (post.removed) continue
+    entries.push(toEntry(row, post.score))
+  }
+  return entries
+}
+
+/**
+ * Reads a handful of Map Posts from Reddit, pairing each answer with the row it
+ * belongs to. A post that could not be read is `undefined` — which of the two
+ * things that means is the caller's to decide, and they decide it differently.
+ */
+async function fetchPosts(
+  rows: readonly IndexRow[],
+): Promise<{row: IndexRow; post: Post | undefined}[]> {
+  return await Promise.all(
+    rows.map(async row => {
+      try {
+        return {row, post: await reddit.getPostById(row.t3)}
+      } catch {
+        return {row, post: undefined}
+      }
+    }),
+  )
+}
+
+function toEntry(row: IndexRow, score?: number): IndexEntry {
+  const entry: IndexEntry = {
+    t3: row.t3,
+    title: row.title,
+    author: row.author,
+    pinCount: row.pinCount,
+    createdAt: row.createdAt,
+  }
+  if (score !== undefined) entry.score = score
+  return entry
+}
+
+function matchesQuery(row: IndexRow, query: string): boolean {
+  if (!query) return true
+  return (
+    row.title.toLowerCase().includes(query) ||
+    row.author.toLowerCase().includes(query)
+  )
+}
+
+/**
+ * The cron half of ADR-0011: refresh a bounded slice of the cached scores the
+ * Top Sort orders by, then leave the cursor where the next run should pick up.
+ * Under {@link ScoreRefreshBatch} Maps this refreshes everything every run;
+ * above it, the refresh interval stretches instead of the job growing without
+ * end.
+ */
+async function routeRefreshScores(): Promise<TriggerResponse> {
+  const rows = await dbGetIndex()
+  if (!rows.length) return {}
+
+  const start = (await dbGetScoreCursor()) % rows.length
+  const batch = rows.slice(start, start + ScoreRefreshBatch)
+  const fetched = await fetchPosts(batch)
+
+  // A post that can't be read keeps the score it had. Unlisting is the read
+  // path's job, where a failure has four siblings to be judged against.
+  const scores = fetched
+    .filter(({post}) => post !== undefined)
+    .map(({row, post}) => ({t3: row.t3, score: post?.score ?? 0}))
+  await dbSetCachedScores(scores)
+  await dbSetScoreCursor((start + batch.length) % rows.length)
   return {}
 }
 
-async function createMapPost() {
+/**
+ * Reports whether a key is stored without reporting the key. That is the whole
+ * discipline here: a moderator needs to know if place search is configured,
+ * and needs no more than that to decide whether to type a new one.
+ */
+async function routeMenuPlacesKey(): Promise<UiResponse> {
+  const stored = await dbGetPlacesApiKey()
+  return {
+    showForm: {
+      name: PlacesKeyFormName,
+      form: {
+        title: 'Google Places API key',
+        description: stored
+          ? 'A key is stored for this subreddit. Typing a new one replaces it.'
+          : 'No key is stored, so pins can only be added by clicking the map.',
+        acceptLabel: 'Save',
+        fields: [
+          {
+            type: 'string',
+            name: 'key',
+            label: 'API key',
+            // Never pre-filled, even though the value is known here: the
+            // stored key must not travel back to a client, and a masked
+            // field would render it as dots the moderator cannot verify.
+            isSecret: true,
+            // Devvit refuses `isSecret` without this, using one validator for
+            // form fields and settings alike. It does not make the key an app
+            // setting and cannot widen its scope: `transformForm` drops
+            // `scope` on the way to the wire, and the form field proto has no
+            // such field to carry it. The key stays in this subreddit's Redis.
+            scope: 'app',
+            helpText: 'Leave blank to keep the stored key unchanged.',
+            placeholder: 'AIza...',
+          },
+          {
+            type: 'boolean',
+            name: 'remove',
+            label: 'Remove the stored key instead',
+            defaultValue: false,
+          },
+        ],
+      },
+    },
+  }
+}
+
+async function routeFormPlacesKey(
+  reqMsg: IncomingMessage,
+): Promise<UiResponse> {
+  const req = await readJson<PlacesKeyFormReq>(reqMsg)
+  const key = req.key?.trim()
+
+  // Checked before the key, so that ticking the box does what it says even if
+  // the moderator also typed something.
+  if (req.remove) {
+    await dbDeletePlacesApiKey()
+    return {
+      showToast: {text: 'Places API key removed.', appearance: 'success'},
+    }
+  }
+  if (!key) return {showToast: {text: 'No change: no key was entered.'}}
+
+  const check = await checkPlacesApiKey(key)
+  // A key Google refuses is never stored, so a typo cannot displace the
+  // working key that is already there.
+  if (check === 'rejected') {
+    return {
+      showToast: {text: 'Google rejected that key, so it was not saved.'},
+    }
+  }
+
+  await dbSetPlacesApiKey(key)
+  // An unreachable Google is not a reason to refuse a key the moderator may
+  // well have typed correctly — but it is a reason not to claim it works.
+  return {
+    showToast:
+      check === 'ok'
+        ? {text: 'Places API key saved.', appearance: 'success'}
+        : {text: 'Key saved, but Google could not be reached to check it.'},
+  }
+}
+
+async function createMapPost(title: string) {
   const ownerId = context.userId
-  if (!ownerId) throw Error('no user id')
-  const post = await reddit.submitCustomPost({
-    title: `${context.username ?? 'Someone'}'s Map`,
+  if (!ownerId) throw new HttpError(401, 'you must be logged in to make a map')
+  const post = await reddit.submitCustomPost({title})
+  await dbCreateMap(post.id as T3, ownerId, {
+    title,
+    author: context.username ?? '',
+    createdAt: Date.now(),
   })
-  await dbCreateMap(post.id as T3, ownerId)
   return post
 }
 

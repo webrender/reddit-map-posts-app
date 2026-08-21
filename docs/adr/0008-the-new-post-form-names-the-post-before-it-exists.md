@@ -1,0 +1,13 @@
+# The New Post Form names the Post before the Post exists
+
+A Post's title used to be `"{username}'s Map"`, unconditionally, because the menu item was the whole of creation: pick it, and a Post already existed. Every Map in a subreddit therefore looked the same in the feed, and the one line Reddit shows a scrolling reader said nothing about what was on the map. Reddit's menu actions can answer with a form instead of a result ([menu responses](https://developers.reddit.com/docs/capabilities/client/menu-actions#menu-responses)), so the menu item now asks for a title first.
+
+That splits creation across two endpoints, and the split is the point. `/internal/on/menu/new-post` creates nothing — it returns `showForm`, a description of fields for Reddit to render — and `/internal/on/form/new-post`, which `devvit.json`'s `forms` map names `newPost`, receives the submitted values and does the creating. So cancelling the form leaves nothing behind: there is no Post to delete, no Map keyed to a post id that will never be seen. The alternative — create, then rename — would have had to survive a user who closes the modal, and would have put an untitled Post in the subreddit for as long as that took.
+
+Reddit posts the submitted values as a flat JSON object keyed by field name, with no envelope: the field named `title` arrives as `{"title": "..."}`. The form name in `devvit.json` and the name in the `showForm` response are the same string in two files that cannot import each other, which is what `NewPostFormName` in `src/shared/api.ts` is for — the server side of the pair is at least spelled once.
+
+The form endpoint answers a rejected title with a 200 and a toast, not a 4xx. A blank or over-long title is not a malformed request; it is a person who has to type something else, and the toast is what tells them so. Reserving the error path for genuine faults also keeps the server log honest, since `onReq` logs a stack trace for anything that throws. The length cap is Reddit's own 300 characters, checked here so the failure is a sentence the user can act on rather than whatever `submitCustomPost` raises.
+
+The app install trigger still creates a Post, and still calls it `"{username}'s Map"` — a trigger has no one in front of it to ask. That default is also what the form's title field is pre-filled with, so the old behaviour is one keystroke away rather than gone.
+
+If a future Post needs more setup than a title — a starting location, a category list — this form is where it goes, and the reason to resist is that everything else about a Map is editable afterwards on the Map itself. The title is here because it is the one thing that is not.
