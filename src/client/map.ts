@@ -249,15 +249,26 @@ async function init(): Promise<void> {
   })
   if (!isPreview) wireMapGestures()
 
+  // A Viewer until the Map says otherwise. The markup cannot know whose Map
+  // this is, so the controls that answer to that start off, and the round trip
+  // that decides it is not a window in which a Viewer can reach them.
+  document.body.classList.add('viewer-mode')
+  deletePostBtn.hidden = true
+
   const data = await fetchGetMap()
-  if (!data) return
+  // Nothing to draw and nothing wired up, so the toolbar the page painted
+  // before the fetch would be a set of controls that answer to nothing. It
+  // keeps the read-only face it started with, and says why it is empty.
+  if (!data) {
+    setStatus('This map could not be loaded. Try again in a moment.')
+    return
+  }
 
   isOwner = data.isOwner
   pins = data.pins
   defaultArea = data.defaultArea
   document.body.classList.toggle('viewer-mode', !isOwner)
-  // Hidden until the Map says whose it is, so a Viewer never sees it flicker
-  // past on the way to being hidden. The Preview has no toolbar at all.
+  // The Preview has no toolbar to hold it.
   deletePostBtn.hidden = isPreview || !isOwner
 
   // A Preview is the markers and nothing else: no Pin Cards to build, no
@@ -619,7 +630,10 @@ function closePinDialog(): void {
   pendingImageDataUrl = undefined
   removeImage = false
   pinForm.reset()
-  pinDialog.close()
+  // Reached both ways round: as the reason the dialog is closing, and as the
+  // `close` event it fires on the way. Closing a closed dialog does nothing,
+  // which is what makes the second pass harmless.
+  if (pinDialog.open) pinDialog.close()
 }
 
 async function savePin(): Promise<void> {
@@ -939,6 +953,11 @@ function wireEvents(): void {
     void savePin()
   })
   pinCancelBtn.addEventListener('click', () => closePinDialog())
+  // Escape closes a modal dialog itself, without passing through Cancel, so
+  // the tidying up hangs off the dialog rather than off that button. Without
+  // it a dismissed New Pin leaves its provisional marker on the Map with
+  // nothing left holding a reference to remove it by.
+  pinDialog.addEventListener('close', () => closePinDialog())
   pinDeleteBtn.addEventListener('click', () => void deleteEditingPin())
 }
 

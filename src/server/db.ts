@@ -123,8 +123,29 @@ export async function dbUnlistMap(t3: T3): Promise<void> {
     redis.zRem(INDEX_KEY, [t3]),
     redis.zRem(INDEX_PINS_KEY, [t3]),
     redis.zRem(INDEX_SCORE_KEY, [t3]),
+    redis.zRem(INDEX_MISS_KEY, [t3]),
     redis.hDel(INDEX_META_KEY, [t3]),
   ])
+}
+
+/**
+ * How many times in a row Reddit has failed to answer for each indexed Map
+ * Post. Normally empty: a row only appears here between a failed read and the
+ * next successful one, which is what makes reading the whole thing cheap.
+ */
+export async function dbGetIndexMisses(): Promise<Map<string, number>> {
+  const misses = await redis.zRange(INDEX_MISS_KEY, 0, -1)
+  return new Map(misses.map(z => [z.member, z.score]))
+}
+
+/** Counts one failed read, answering how many have now happened in a row. */
+export async function dbRecordIndexMiss(t3: T3): Promise<number> {
+  return await redis.zIncrBy(INDEX_MISS_KEY, t3, 1)
+}
+
+/** Forgets the failures, because Reddit has just answered for this one. */
+export async function dbClearIndexMiss(t3: T3): Promise<void> {
+  await redis.zRem(INDEX_MISS_KEY, [t3])
 }
 
 /**
@@ -216,6 +237,8 @@ const INDEX_META_KEY = 'index-meta'
 const INDEX_PINS_KEY = 'index-pins'
 /** Map Post id -> upvotes, as of the last refresh. */
 const INDEX_SCORE_KEY = 'index-score'
+/** Map Post id -> consecutive failed reads of it. See {@link dbGetIndexMisses}. */
+const INDEX_MISS_KEY = 'index-miss'
 /** How far through {@link INDEX_KEY} the last score refresh got. */
 const INDEX_CURSOR_KEY = 'index-cursor'
 

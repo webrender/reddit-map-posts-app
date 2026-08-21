@@ -6,6 +6,18 @@ export type ErrorRsp = {error: string; status: number}
 export type LatLng = {lat: number; lng: number}
 
 /**
+ * Whether a value is somewhere a Pin can sit. Asked of everything that arrives
+ * over the wire: a Pin whose Location is missing or malformed is one the Map
+ * cannot draw and cannot frame, and every reader of that Map — the Owner
+ * included — gets a blank page with no way back to the Pin that did it.
+ */
+export function isLatLng(value: unknown): value is LatLng {
+  if (typeof value !== 'object' || value === null) return false
+  const {lat, lng} = value as {lat?: unknown; lng?: unknown}
+  return isLat(lat) && isLng(lng)
+}
+
+/**
  * A rectangle of the world, in the corners a Google Places viewport gives. On
  * an area that crosses the antimeridian `west` is greater than `east`, which is
  * how Google spells it and what every reader here has to allow for.

@@ -31,6 +31,7 @@ import {
   type IndexPostFormReq,
   NewPostFormName,
   type NewPostFormReq,
+  type Pin,
   PlacesKeyFormName,
   type PlacesKeyFormReq,
   PostTitleMaxLen,
@@ -1270,6 +1271,60 @@ test('add pin: rejects an empty title', async () => {
   assert.equal(rsp.status, 400)
 })
 
+test('add pin: rejects a pin with nowhere to be', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+
+  // A stored Pin with no Location throws in the client on every later load and
+  // takes the whole Map down with it — for the Owner too, who is then the one
+  // person who could have deleted it and has no way left to.
+  for (const location of [
+    undefined,
+    null,
+    'somewhere',
+    {},
+    {lat: 10},
+    {lat: 'ten', lng: 20},
+    {lat: 91, lng: 20},
+    {lat: 10, lng: 181},
+    {lat: Number.NaN, lng: 20},
+  ]) {
+    const req = {location, title: 'Nowhere'} as unknown as AddPinReq
+    const rsp = await postJson(Endpoint.AddPin, req)
+    assert.equal(rsp.status, 400, `${JSON.stringify(location)}`)
+  }
+
+  const getRsp = await fetch(`${serverURL}/${Endpoint.GetMap}`)
+  assert.deepEqual(((await getRsp.json()) as GetMapRsp).pins, [])
+})
+
+test('add pin: rejects a title that is not one', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+
+  // A missing title used to throw inside `normalizeTitle`, which is a 500 for
+  // what is plainly a bad request.
+  for (const title of [undefined, null, 42, {}]) {
+    const req = {location: {lat: 10, lng: 20}, title} as unknown as AddPinReq
+    const rsp = await postJson(Endpoint.AddPin, req)
+    assert.equal(rsp.status, 400, `${JSON.stringify(title)}`)
+  }
+})
+
+test('update pin: rejects a location that is not one', async () => {
+  const pin: Pin = {id: 'p1', location: {lat: 1, lng: 2}, title: 'Original'}
+  seedMap({ownerId: OWNER, pins: [pin]})
+
+  const req = {
+    id: 'p1',
+    location: {lat: 'north', lng: 2},
+  } as unknown as UpdatePinReq
+  const rsp = await postJson(Endpoint.UpdatePin, req)
+  assert.equal(rsp.status, 400)
+
+  const getRsp = await fetch(`${serverURL}/${Endpoint.GetMap}`)
+  const map = (await getRsp.json()) as GetMapRsp
+  assert.deepEqual(map.pins[0]?.location, {lat: 1, lng: 2})
+})
+
 test('add pin: rejects a non-http(s) link', async () => {
   seedMap({ownerId: OWNER, pins: []})
 
@@ -1612,21 +1667,82 @@ test('index: a post Reddit no longer has is unlisted, keeping its map data', asy
   seedRedditPost(alive)
   redisValues.set(`owner:${gone}`, OWNER)
 
-  const body = (await (await getIndex()).json()) as GetIndexRsp
-  assert.deepEqual(
-    body.entries.map(entry => entry.t3),
-    [alive],
-  )
+  // Off the page from the first failed read; off the index only once the
+  // failure has repeated, since one of them says nothing about which of the
+  // two things happened.
+  for (let load = 1; load <= 3; load++) {
+    const body = (await (await getIndex()).json()) as GetIndexRsp
+    assert.deepEqual(
+      body.entries.map(entry => entry.t3),
+      [alive],
+      `load ${load}`,
+    )
+    assert.equal(redisSets.get('index')?.has(gone), load !== 3, `load ${load}`)
+  }
 
   // Gone from every index key, but its Map is left where it is: a misread
   // deletion must not cost someone their Pins.
   assert.equal(redisSets.get('index')?.has(gone), false)
   assert.equal(redisSets.get('index-pins')?.has(gone), false)
+  assert.equal(redisSets.get('index-miss')?.has(gone), false)
   assert.equal(redisHashes.get('index-meta')?.has(gone), false)
   assert.equal(redisValues.get(`owner:${gone}`), OWNER)
 
   const after = (await (await getIndex()).json()) as GetIndexRsp
   assert.equal(after.total, 1)
+})
+
+test('index: one failed read of a live post does not unlist it', async () => {
+  const flaky = 't3_flaky' as T3
+  seedIndexed(flaky, {title: 'Flaky', author: 'anna', createdAt: 2})
+  seedIndexed('t3_alive' as T3, {title: 'Alive', author: 'bob', createdAt: 1})
+  seedRedditPost('t3_alive' as T3)
+
+  // Reddit rate-limits this one call and answers for it next time — which is
+  // the case a single miss used to be indistinguishable from.
+  const twice = (await (await getIndex()).json()) as GetIndexRsp
+  assert.equal(twice.entries.length, 1)
+  assert.equal(redisSets.get('index')?.has(flaky), true)
+  assert.equal(redisSets.get('index-miss')?.get(flaky), 1)
+
+  seedRedditPost(flaky, {score: 7})
+  const body = (await (await getIndex()).json()) as GetIndexRsp
+  assert.deepEqual(
+    body.entries.map(entry => entry.t3),
+    [flaky, 't3_alive'],
+  )
+  // And the count is forgotten, so the next miss starts from nothing.
+  assert.equal(redisSets.get('index-miss')?.has(flaky), false)
+})
+
+test('index: misses have to be consecutive to unlist', async () => {
+  const flaky = 't3_flaky' as T3
+  seedIndexed(flaky, {title: 'Flaky', author: 'anna', createdAt: 2})
+  seedIndexed('t3_alive' as T3, {title: 'Alive', author: 'bob', createdAt: 1})
+  seedRedditPost('t3_alive' as T3)
+
+  for (let round = 0; round < 3; round++) {
+    await getIndex()
+    await getIndex()
+    seedRedditPost(flaky)
+    await getIndex()
+    redditPosts.delete(flaky)
+  }
+
+  // Six misses, never three in a row, so the Map Post is still listed.
+  assert.equal(redisSets.get('index')?.has(flaky), true)
+})
+
+test('index: an outage counts against nobody', async () => {
+  seedIndexed('t3_a' as T3, {title: 'A', author: 'anna', createdAt: 2})
+  seedIndexed('t3_b' as T3, {title: 'B', author: 'bob', createdAt: 1})
+
+  // Every read failing is Reddit being unreachable, not every post being gone.
+  for (let load = 0; load < 4; load++) await getIndex()
+
+  assert.equal(redisSets.get('index')?.has('t3_a'), true)
+  assert.equal(redisSets.get('index')?.has('t3_b'), true)
+  assert.equal(redisSets.get('index-miss')?.size ?? 0, 0)
 })
 
 test('index: a removed post is hidden but stays indexed', async () => {
@@ -1831,6 +1947,36 @@ test('refresh scores: caches what Reddit says and moves the cursor on', async ()
   assert.equal(redisSets.get('index-score')?.get(second), 22)
   // Both fit in one batch, so the cursor wraps back to the start.
   assert.equal(redisValues.get('index-cursor'), '0')
+})
+
+test('refresh scores: works past one chunk, and banks the cursor as it goes', async () => {
+  // More rows than one chunk of Reddit reads, so the run has to make several
+  // and end up in the right place regardless of where the chunks fell.
+  for (let n = 0; n < 60; n++) {
+    const t3 = `t3_row${n}` as T3
+    seedIndexed(t3, {title: `Row ${n}`, author: 'anna', createdAt: n, score: 0})
+    seedRedditPost(t3, {score: n})
+  }
+
+  assert.equal((await postJson(Endpoint.OnTaskRefreshScores, {})).status, 200)
+  assert.equal(redisSets.get('index-score')?.get('t3_row0' as T3), 0)
+  assert.equal(redisSets.get('index-score')?.get('t3_row59' as T3), 59)
+  // All 60 fit in one batch, so the cursor comes back round to the start.
+  assert.equal(redisValues.get('index-cursor'), '0')
+})
+
+test('refresh scores: a map with no pins is not worth a read', async () => {
+  const listed = 't3_listed' as T3
+  const empty = 't3_empty' as T3
+  seedIndexed(listed, {title: 'One', author: 'anna', createdAt: 1, score: 0})
+  seedIndexed(empty, {title: 'Two', author: 'bob', createdAt: 2, pins: 0})
+  seedRedditPost(listed, {score: 5})
+  seedRedditPost(empty, {score: 99})
+
+  assert.equal((await postJson(Endpoint.OnTaskRefreshScores, {})).status, 200)
+  assert.equal(redisSets.get('index-score')?.get(listed), 5)
+  // No Sort can reach it, so the batch is not spent on it.
+  assert.equal(redisSets.get('index-score')?.has(empty), false)
 })
 
 test('refresh scores: a post Reddit will not answer for keeps its cached score', async () => {

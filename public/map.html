@@ -99,6 +99,14 @@
     button:hover {
       background: var(--bg-hover);
     }
+    /* Said explicitly because the `display` above outranks the user agent's
+       `[hidden]` rule: an author rule wins over a user agent one whatever
+       either selector's specificity, so every `hidden` button on the page —
+       the owner's, the moderator's, the ones a dialog turns off — needs this
+       to be hidden at all. */
+    button[hidden] {
+      display: none;
+    }
     :focus-visible {
       outline: 2px solid var(--focus);
       outline-offset: 2px;

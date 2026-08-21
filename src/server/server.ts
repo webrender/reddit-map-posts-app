@@ -36,6 +36,8 @@ import {
   IndexSort,
   indexPostForm,
   isIndexSort,
+  isLatLng,
+  type LatLng,
   type MapArea,
   NewPostFormName,
   type NewPostFormReq,
@@ -51,6 +53,7 @@ import {
 } from '../shared/api.ts'
 import {
   dbAddPin,
+  dbClearIndexMiss,
   dbCreateMap,
   dbDeleteDefaultArea,
   dbDeleteMap,
@@ -58,10 +61,12 @@ import {
   dbDeletePlacesApiKey,
   dbGetDefaultArea,
   dbGetIndex,
+  dbGetIndexMisses,
   dbGetMap,
   dbGetPlacesApiKey,
   dbGetScoreCursor,
   dbIsMap,
+  dbRecordIndexMiss,
   dbSetCachedScores,
   dbSetDefaultArea,
   dbSetPlacesApiKey,
@@ -86,6 +91,20 @@ const INDEX_ENTRYPOINT = 'index'
  * doesn't grow with the subreddit — see ADR-0011.
  */
 const ScoreRefreshBatch = 300
+
+/**
+ * How many Reddit reads one cron run makes at a time. The batch is bounded for
+ * cost; this is bounded for blast radius — a run that dies partway has still
+ * banked every chunk before it, cursor included.
+ */
+const ScoreRefreshChunk = 25
+
+/**
+ * How many failed reads in a row it takes to unlist a Map Post. More than one,
+ * because one is indistinguishable from Reddit having a bad second; small,
+ * because until it is reached a deleted post keeps a row nobody can use.
+ */
+const IndexMissLimit = 3
 
 type AnyRsp =
   | GetMapRsp
@@ -235,7 +254,7 @@ async function routeAddPin(reqMsg: IncomingMessage): Promise<AddPinRsp> {
 
   const pin: Pin = {
     id: crypto.randomUUID(),
-    location: req.location,
+    location: normalizeLocation(req.location),
     title: normalizeTitle(req.title),
   }
   if (req.fromPlaceSearch) pin.fromPlaceSearch = true
@@ -264,7 +283,7 @@ async function routeUpdatePin(reqMsg: IncomingMessage): Promise<UpdatePinRsp> {
     if (existing?.fromPlaceSearch) {
       throw new HttpError(400, 'a place search pin cannot be moved')
     }
-    patch.location = req.location
+    patch.location = normalizeLocation(req.location)
   }
   if (req.title !== undefined) patch.title = normalizeTitle(req.title)
   if (req.category !== undefined) patch.category = req.category || undefined
@@ -513,11 +532,18 @@ async function routeGetIndex(
  * is a bounded cost, and it answers two questions at once — what the score is
  * now, and whether the post is still there (ADR-0011).
  *
- * A post that is gone is dropped from the index here, so a page may render
- * short and be whole again on the next load. A post that is merely *removed* is
- * hidden but kept, since a moderator can put it back. And if every read failed,
- * Reddit is treated as unreachable rather than as having lost every post at
- * once: nothing is unlisted, and the Entries render without a score.
+ * A post that could not be read is left off the page either way, since there is
+ * nothing to send a reader to. What it takes to *unlist* one is more than that:
+ * a read fails for two very different reasons, and Reddit rate-limiting one
+ * call out of five looks exactly like the post having been deleted. Unlisting
+ * is forever — nothing re-indexes a Map — so it waits for
+ * {@link IndexMissLimit} failures in a row, and a single answer from Reddit
+ * puts the count back to nothing.
+ *
+ * A post that is merely *removed* is hidden but kept, since a moderator can put
+ * it back. And if every read failed, Reddit is treated as unreachable rather
+ * than as having lost every post at once: nothing is counted against any of
+ * them, and the Entries render without a score.
  */
 async function liveEntries(rows: readonly IndexRow[]): Promise<IndexEntry[]> {
   if (!rows.length) return []
@@ -525,12 +551,18 @@ async function liveEntries(rows: readonly IndexRow[]): Promise<IndexEntry[]> {
   const fetched = await fetchPosts(rows)
   if (fetched.every(({post}) => !post)) return rows.map(row => toEntry(row))
 
+  const misses = await dbGetIndexMisses()
   const entries: IndexEntry[] = []
   for (const {row, post} of fetched) {
     if (!post) {
-      await dbUnlistMap(row.t3)
+      if ((await dbRecordIndexMiss(row.t3)) >= IndexMissLimit) {
+        await dbUnlistMap(row.t3)
+      }
       continue
     }
+    // Written only where there is something to forget, so the ordinary page
+    // load stays five reads and no writes.
+    if (misses.has(row.t3)) await dbClearIndexMiss(row.t3)
     if (post.removed) continue
     entries.push(toEntry(row, post.score))
   }
@@ -584,20 +616,30 @@ function matchesQuery(row: IndexRow, query: string): boolean {
  * end.
  */
 async function routeRefreshScores(): Promise<TriggerResponse> {
-  const rows = await dbGetIndex()
+  // A Map with no Pins is not listed, so no Sort can reach its score. Spending
+  // the batch on one would be spending it on a row nobody can see.
+  const rows = (await dbGetIndex()).filter(row => row.pinCount > 0)
   if (!rows.length) return {}
 
   const start = (await dbGetScoreCursor()) % rows.length
   const batch = rows.slice(start, start + ScoreRefreshBatch)
-  const fetched = await fetchPosts(batch)
 
-  // A post that can't be read keeps the score it had. Unlisting is the read
-  // path's job, where a failure has four siblings to be judged against.
-  const scores = fetched
-    .filter(({post}) => post !== undefined)
-    .map(({row, post}) => ({t3: row.t3, score: post?.score ?? 0}))
-  await dbSetCachedScores(scores)
-  await dbSetScoreCursor((start + batch.length) % rows.length)
+  // Banked chunk by chunk rather than in one go at the end. A run that times
+  // out or throws partway has still refreshed everything before the break and
+  // left the cursor past it, so the next run carries on instead of starting
+  // the same batch over — which, with the cursor only ever written at the end,
+  // meant one bad run could freeze the Top Sort on the same rows forever.
+  for (let done = 0; done < batch.length; done += ScoreRefreshChunk) {
+    const chunk = batch.slice(done, done + ScoreRefreshChunk)
+    const fetched = await fetchPosts(chunk)
+    // A post that can't be read keeps the score it had. Unlisting is the read
+    // path's job, where a failure has four siblings to be judged against.
+    const scores = fetched
+      .filter(({post}) => post !== undefined)
+      .map(({row, post}) => ({t3: row.t3, score: post?.score ?? 0}))
+    await dbSetCachedScores(scores)
+    await dbSetScoreCursor((start + done + chunk.length) % rows.length)
+  }
   return {}
 }
 
@@ -798,9 +840,23 @@ async function createMapPost(title: string) {
 }
 
 function normalizeTitle(title: string): string {
-  const trimmed = title.trim()
+  // Typed as a string and checked as though it were not, because the type is a
+  // claim about a JSON body this route did not write.
+  const trimmed = typeof title === 'string' ? title.trim() : ''
   if (!trimmed) throw new HttpError(400, 'title is required')
   return trimmed
+}
+
+/**
+ * A Pin's Location, refused rather than stored when it is not one. A Pin
+ * without somewhere to be is not a lesser Pin: it throws in the client on
+ * every later load, taking the whole Map down with it for the Owner who would
+ * have to be the one to delete it.
+ */
+function normalizeLocation(location: unknown): LatLng {
+  if (!isLatLng(location))
+    throw new HttpError(400, 'a valid location is required')
+  return location
 }
 
 function normalizeLink(link: string): string {
