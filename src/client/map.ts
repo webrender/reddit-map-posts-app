@@ -283,6 +283,7 @@ async function init(): Promise<void> {
       const pin = pins.find(candidate => candidate.id === pinId)
       if (pin) openEditDialog(pin)
     },
+    onOpenLink: url => navigateTo(url),
     onToggle: () => map.resize(),
   })
 

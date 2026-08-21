@@ -418,7 +418,14 @@
     .pin-card-body {
       padding: 0.5rem;
     }
+    .pin-card-title-row {
+      display: flex;
+      align-items: center;
+      gap: 0.3rem;
+    }
     .pin-card-title {
+      flex: 0 1 auto;
+      min-width: 0;
       margin: 0;
       font-size: 0.875rem;
       font-weight: 600;
@@ -440,11 +447,16 @@
       white-space: pre-wrap;
     }
     .pin-card-link {
-      display: inline-block;
-      margin-top: 0.4rem;
-      font-size: 0.8125rem;
-      font-weight: 600;
+      flex: 0 0 auto;
+      display: inline-flex;
+      color: var(--text-muted);
+    }
+    .pin-card-link:hover {
       color: var(--focus);
+    }
+    .pin-card-link-icon {
+      width: 1rem;
+      height: 1rem;
     }
     .pin-card-actions {
       display: flex;

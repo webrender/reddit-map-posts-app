@@ -71,6 +71,8 @@ export type SidebarHandlers = {
   onSelectCard(pinId: string): void
   /** A Pin Card's edit control was clicked; Owners only. */
   onEditPin(pinId: string): void
+  /** A Pin Card's external link was clicked. */
+  onOpenLink(url: string): void
   /** The Sidebar opened or closed, changing how much room the Map has. */
   onToggle(open: boolean): void
 }
@@ -185,6 +187,34 @@ function emptyMessage(state: SidebarState): HTMLElement {
   return message
 }
 
+const svgNs = 'http://www.w3.org/2000/svg'
+
+/** A box with an arrow escaping its top-right corner: the "opens elsewhere" mark. */
+function externalLinkIcon(): SVGSVGElement {
+  const svg = document.createElementNS(svgNs, 'svg')
+  svg.setAttribute('class', 'pin-card-link-icon')
+  svg.setAttribute('viewBox', '0 0 20 20')
+  svg.setAttribute('aria-hidden', 'true')
+  svg.setAttribute('focusable', 'false')
+
+  const box = document.createElementNS(svgNs, 'path')
+  box.setAttribute(
+    'd',
+    'M8.5 5.5H5.5a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-3',
+  )
+  const arrow = document.createElementNS(svgNs, 'path')
+  arrow.setAttribute('d', 'M9.5 11.5 16 5M11.5 5H16v4.5')
+  for (const path of [box, arrow]) {
+    path.setAttribute('fill', 'none')
+    path.setAttribute('stroke', 'currentColor')
+    path.setAttribute('stroke-width', '1.75')
+    path.setAttribute('stroke-linecap', 'round')
+    path.setAttribute('stroke-linejoin', 'round')
+    svg.append(path)
+  }
+  return svg
+}
+
 function pinCard(pin: Pin, isOwner: boolean, selected: boolean): HTMLElement {
   // A card holds a link and (for Owners) an edit button, and a <button> may not
   // contain an <a> — hence a div carrying the button role by hand.
@@ -211,10 +241,31 @@ function pinCard(pin: Pin, isOwner: boolean, selected: boolean): HTMLElement {
   const body = document.createElement('div')
   body.className = 'pin-card-body'
 
+  const titleRow = document.createElement('div')
+  titleRow.className = 'pin-card-title-row'
+
   const title = document.createElement('h3')
   title.className = 'pin-card-title'
   title.textContent = pin.title
-  body.append(title)
+  titleRow.append(title)
+
+  if (pin.link) {
+    const link = document.createElement('a')
+    link.className = 'pin-card-link'
+    link.href = pin.link
+    link.rel = 'noopener noreferrer'
+    link.setAttribute('aria-label', 'Open link')
+    link.append(externalLinkIcon())
+    const url = pin.link
+    link.addEventListener('click', ev => {
+      ev.preventDefault()
+      ev.stopPropagation()
+      handlers.onOpenLink(url)
+    })
+    titleRow.append(link)
+  }
+
+  body.append(titleRow)
 
   if (pin.category) {
     const category = document.createElement('span')
@@ -228,17 +279,6 @@ function pinCard(pin: Pin, isOwner: boolean, selected: boolean): HTMLElement {
     description.className = 'pin-card-description'
     description.textContent = pin.description
     body.append(description)
-  }
-
-  if (pin.link) {
-    const link = document.createElement('a')
-    link.className = 'pin-card-link'
-    link.href = pin.link
-    link.target = '_blank'
-    link.rel = 'noopener noreferrer'
-    link.textContent = 'More info'
-    link.addEventListener('click', ev => ev.stopPropagation())
-    body.append(link)
   }
 
   card.append(body)
