@@ -1,6 +1,5 @@
 import {
   context,
-  exitExpandedMode,
   getWebViewMode,
   navigateTo,
   requestExpandedMode,
@@ -74,9 +73,6 @@ const categoryOptionsDatalist = document.getElementById(
 ) as HTMLDataListElement
 const deletePostBtn = document.getElementById(
   'delete-post-btn',
-) as HTMLButtonElement
-const fullscreenBtn = document.getElementById(
-  'fullscreen-btn',
 ) as HTMLButtonElement
 const openMapBtn = document.getElementById('open-map-btn') as HTMLButtonElement
 
@@ -836,12 +832,6 @@ function wireOpenMap(): void {
 }
 
 /**
- * Full screen's one mode control: the way back out. It never has to offer the
- * way in, since a web view reading itself as expanded is already there and a
- * web view reading itself as inline is a Preview, whose Open Map button is the
- * whole of its toolbar.
- */
-/**
  * The one action in the app that cannot be undone, so it asks first — through
  * Reddit's own modal, whose Delete button is the confirmation.
  *
@@ -867,16 +857,7 @@ async function confirmDeletePost(): Promise<void> {
   navigateTo(`https://www.reddit.com/r/${context.subredditName}`)
 }
 
-function wireExitFullscreen(): void {
-  if (readWebViewMode() !== 'expanded') return
-  fullscreenBtn.hidden = false
-  fullscreenBtn.addEventListener('click', ev =>
-    changeWebViewMode(() => exitExpandedMode(ev)),
-  )
-}
-
 function wireEvents(): void {
-  wireExitFullscreen()
   wireDeletePost()
 
   filterBtn.addEventListener('click', () => setToolbarFace('filter'))
