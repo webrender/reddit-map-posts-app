@@ -41,3 +41,12 @@
     --shadow: 0 0.25rem 0.75rem rgb(0 0 0 / 50%);
   }
 }
+/* Said explicitly because a `button` rule's `display` outranks the user
+   agent's `[hidden]` rule: an author rule wins over a user agent one whatever
+   either selector's specificity, so every `hidden` button on either post type
+   — the owner's, the moderator's, the ones a dialog turns off — needs this to
+   be hidden at all. Lives here, once, rather than in either document's own
+   `button` rules, since both post types wear it. */
+button[hidden] {
+  display: none;
+}

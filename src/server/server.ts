@@ -232,17 +232,20 @@ async function route(
 
 async function routeGetMap(): Promise<GetMapRsp> {
   const t3 = requirePostId()
-  const map = await dbGetMap(t3)
+  // Read for every Map, not only the empty ones: a Map that loses its last Pin
+  // while the page is open needs somewhere to go, and the Default Area is one
+  // Redis read against the one this route already makes — independent of it,
+  // so the two run together rather than one after the other.
+  const [map, defaultArea] = await Promise.all([
+    dbGetMap(t3),
+    dbGetDefaultArea(),
+  ])
   if (!map) throw new HttpError(404, 'map not found')
   const rsp: GetMapRsp = {
     ownerId: map.ownerId,
     pins: map.pins,
     isOwner: map.ownerId === context.userId,
   }
-  // Read for every Map, not only the empty ones: a Map that loses its last Pin
-  // while the page is open needs somewhere to go, and the Default Area is one
-  // Redis read against the two this route already makes.
-  const defaultArea = await dbGetDefaultArea()
   if (defaultArea) rsp.defaultArea = defaultArea
   return rsp
 }
@@ -345,17 +348,11 @@ function routeMenuNewPost(): UiResponse {
 
 async function routeFormNewPost(reqMsg: IncomingMessage): Promise<UiResponse> {
   const req = await readJson<NewPostFormReq>(reqMsg)
-  // A rejected title is the user's to retype, not an error to log, so these
-  // answer 200 with a toast rather than throwing an HttpError.
-  const title = req.title?.trim()
-  if (!title) return {showToast: {text: 'A title is required.'}}
-  if (title.length > PostTitleMaxLen) {
-    return {
-      showToast: {
-        text: `A title can be at most ${PostTitleMaxLen} characters.`,
-      },
-    }
-  }
+  const title = req.title?.trim() ?? ''
+  // A rejected title is the user's to retype, not an error to log, so this
+  // answers 200 with a toast rather than throwing an HttpError.
+  const problem = titleProblem(title)
+  if (problem) return {showToast: {text: `A ${problem}.`}}
 
   const post = await createMapPost(title)
   return {
@@ -373,16 +370,26 @@ async function routeCreateMapPost(
   reqMsg: IncomingMessage,
 ): Promise<CreateMapPostRsp> {
   const req = await readJson<CreateMapPostReq>(reqMsg)
-  const title = req.title?.trim()
-  if (!title) throw new HttpError(400, 'a title is required')
-  if (title.length > PostTitleMaxLen) {
-    throw new HttpError(
-      400,
-      `a title can be at most ${PostTitleMaxLen} characters`,
-    )
-  }
+  const title = req.title?.trim() ?? ''
+  const problem = titleProblem(title)
+  if (problem) throw new HttpError(400, problem)
   const post = await createMapPost(title)
   return {url: post.url}
+}
+
+/**
+ * A title's validity, checked identically everywhere one is typed: required,
+ * and no longer than {@link PostTitleMaxLen}. `undefined` means it passed;
+ * the caller decides how to say otherwise, since a rejected title is a toast
+ * in some forms (prefixed "A ...") and a thrown `HttpError` in others (used
+ * as-is, lowercase, matching this file's other error messages).
+ */
+function titleProblem(trimmedTitle: string): string | undefined {
+  if (!trimmedTitle) return 'title is required'
+  if (trimmedTitle.length > PostTitleMaxLen) {
+    return `title can be at most ${PostTitleMaxLen} characters`
+  }
+  return undefined
 }
 
 /**
@@ -464,16 +471,16 @@ function routeMenuNewIndexPost(): UiResponse {
 async function routeFormNewIndexPost(
   reqMsg: IncomingMessage,
 ): Promise<UiResponse> {
+  // The menu item that raises this form is hidden from non-moderators by
+  // `devvit.json`, but that hides a button — it authorizes nothing. Without
+  // this check, anyone could submit straight to this route and have the app
+  // account post an Index Post on the subreddit's behalf.
+  if (!(await isModerator())) throw new HttpError(403, 'not authorized')
+
   const req = await readJson<IndexPostFormReq>(reqMsg)
-  const title = req.title?.trim()
-  if (!title) return {showToast: {text: 'A title is required.'}}
-  if (title.length > PostTitleMaxLen) {
-    return {
-      showToast: {
-        text: `A title can be at most ${PostTitleMaxLen} characters.`,
-      },
-    }
-  }
+  const title = req.title?.trim() ?? ''
+  const problem = titleProblem(title)
+  if (problem) return {showToast: {text: `A ${problem}.`}}
 
   // Nothing is written to Redis for an Index Post: it holds no state of its
   // own, which is why a subreddit may have any number of them and they all
@@ -692,6 +699,12 @@ async function routeMenuPlacesKey(): Promise<UiResponse> {
 async function routeFormPlacesKey(
   reqMsg: IncomingMessage,
 ): Promise<UiResponse> {
+  // The menu item that raises this form is hidden from non-moderators by
+  // `devvit.json`, but that hides a button — it authorizes nothing. Without
+  // this check, anyone could POST straight to this route and replace or
+  // delete the subreddit's Google Places API key.
+  if (!(await isModerator())) throw new HttpError(403, 'not authorized')
+
   const req = await readJson<PlacesKeyFormReq>(reqMsg)
   const key = req.key?.trim()
 
@@ -754,6 +767,11 @@ async function routeMenuDefaultArea(): Promise<UiResponse> {
 async function routeFormDefaultArea(
   reqMsg: IncomingMessage,
 ): Promise<UiResponse> {
+  // As with the Places API key form: `devvit.json` only hides the menu item
+  // that raises this form, so this route re-checks before changing where
+  // every new Map on the subreddit opens.
+  if (!(await isModerator())) throw new HttpError(403, 'not authorized')
+
   const req = await readJson<DefaultAreaFormReq>(reqMsg)
   const place = req.place?.trim()
 
@@ -805,6 +823,9 @@ async function routeFormDefaultArea(
 async function routeFormDefaultAreaPick(
   reqMsg: IncomingMessage,
 ): Promise<UiResponse> {
+  // The other half of the same form; see routeFormDefaultArea.
+  if (!(await isModerator())) throw new HttpError(403, 'not authorized')
+
   const req = await readJson<DefaultAreaPickFormReq>(reqMsg)
   const [chosen] = req.area ?? []
   const area = chosen ? parseMapArea(chosen) : undefined

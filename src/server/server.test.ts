@@ -65,6 +65,7 @@ const redisZAdd = redis.zAdd.bind(redis)
 const redisZIncrBy = redis.zIncrBy.bind(redis)
 const redisZRange = redis.zRange.bind(redis)
 const redisZRem = redis.zRem.bind(redis)
+const redisWatch = redis.watch.bind(redis)
 const getPostById = reddit.getPostById.bind(reddit)
 const mediaUpload = media.upload.bind(media)
 const submitCustomPost = reddit.submitCustomPost.bind(reddit)
@@ -197,6 +198,46 @@ before(async () => {
     for (const member of members) if (set.delete(member)) removed++
     return removed
   }
+  // A transaction, as far as these tests are concerned: queues each write
+  // against the same mocked methods above and runs them in order on `exec()`.
+  // There is no concurrent writer in a single-threaded test to invalidate a
+  // WATCH, so `exec()` always "succeeds" — the retry path in `dbDeletePin` is
+  // real production behavior this mock has no way to exercise.
+  redis.watch = (async () => {
+    const ops: (() => Promise<unknown>)[] = []
+    const tx = {
+      multi: async () => {},
+      exec: async () => {
+        const results: unknown[] = []
+        for (const op of ops) results.push(await op())
+        return results
+      },
+      set: async (key: string, value: string) => {
+        ops.push(() => redis.set(key, value))
+        return tx
+      },
+      hSet: async (key: string, fieldValues: {[field: string]: string}) => {
+        ops.push(() => redis.hSet(key, fieldValues))
+        return tx
+      },
+      hDel: async (key: string, fields: string[]) => {
+        ops.push(() => redis.hDel(key, fields))
+        return tx
+      },
+      zAdd: async (
+        key: string,
+        ...members: {member: string; score: number}[]
+      ) => {
+        ops.push(() => redis.zAdd(key, ...members))
+        return tx
+      },
+      zIncrBy: async (key: string, member: string, value: number) => {
+        ops.push(() => redis.zIncrBy(key, member, value))
+        return tx
+      },
+    }
+    return tx
+  }) as unknown as typeof redis.watch
   reddit.getPostById = (async (t3: T3) => {
     const post = redditPosts.get(t3)
     if (!post) throw Error(`no such post: ${t3}`)
@@ -314,6 +355,7 @@ after(async () => {
   redis.zIncrBy = redisZIncrBy
   redis.zRange = redisZRange
   redis.zRem = redisZRem
+  redis.watch = redisWatch
   reddit.getPostById = getPostById
   media.upload = mediaUpload
   reddit.submitCustomPost = submitCustomPost
@@ -811,6 +853,7 @@ test("every form the app shows satisfies Devvit's own field rules", async () => 
 
   // The one form no menu item shows: the pick is raised by a search that found
   // more than one place, so it is reached here the way a moderator reaches it.
+  seedModerator()
   placesRspPlaces = [SPRINGFIELD_IL, SPRINGFIELD_MA]
   const req: DefaultAreaFormReq = {place: 'Springfield'}
   const rsp = await postJson(Endpoint.OnFormDefaultArea, req)
@@ -876,6 +919,7 @@ test('places key menu action: says so when no key is stored', async () => {
 })
 
 test('places key form: stores a trimmed key that search then uses', async () => {
+  seedModerator()
   redisValues.delete(PLACES_KEY)
 
   const req: PlacesKeyFormReq = {key: '  fresh-api-key  '}
@@ -892,6 +936,7 @@ test('places key form: stores a trimmed key that search then uses', async () => 
 })
 
 test('places key form: a blank key leaves the stored one alone', async () => {
+  seedModerator()
   const req: PlacesKeyFormReq = {key: '   '}
   const rsp = await postJson(Endpoint.OnFormPlacesKey, req)
   assert.equal(rsp.status, 200)
@@ -899,6 +944,7 @@ test('places key form: a blank key leaves the stored one alone', async () => {
 })
 
 test('places key form: removing wins over anything typed alongside it', async () => {
+  seedModerator()
   const req: PlacesKeyFormReq = {key: 'ignored-key', remove: true}
   const rsp = await postJson(Endpoint.OnFormPlacesKey, req)
   assert.equal(rsp.status, 200)
@@ -911,6 +957,7 @@ test('places key form: removing wins over anything typed alongside it', async ()
 })
 
 test('places key form: a key Google rejects is not stored', async () => {
+  seedModerator()
   placesRspStatus = 403
 
   const req: PlacesKeyFormReq = {key: 'bad-api-key'}
@@ -927,6 +974,7 @@ test('places key form: a key Google rejects is not stored', async () => {
 })
 
 test("places key form: a spent quota is not the key's fault, so it stores", async () => {
+  seedModerator()
   placesRspStatus = 429
 
   const req: PlacesKeyFormReq = {key: 'rate-limited-key'}
@@ -936,6 +984,7 @@ test("places key form: a spent quota is not the key's fault, so it stores", asyn
 })
 
 test('places key form: stores an unverifiable key without claiming it works', async () => {
+  seedModerator()
   placesRspStatus = 0
 
   const req: PlacesKeyFormReq = {key: 'unchecked-key'}
@@ -951,6 +1000,7 @@ test('places key form: stores an unverifiable key without claiming it works', as
 })
 
 test('places key form: removing a key asks Google nothing', async () => {
+  seedModerator()
   placesRspStatus = 403
 
   const req: PlacesKeyFormReq = {remove: true}
@@ -958,6 +1008,16 @@ test('places key form: removing a key asks Google nothing', async () => {
   assert.equal(rsp.status, 200)
   assert.equal(redisValues.get(PLACES_KEY), undefined)
   assert.equal(placesApiKeySent, null)
+})
+
+test('places key form: a reader who does not moderate is forbidden', async () => {
+  // `devvit.json` hides the menu item that raises this form from a
+  // non-moderator, but that is a menu, not a guard — this route must refuse
+  // the submission itself.
+  const req: PlacesKeyFormReq = {key: 'stolen-key'}
+  const rsp = await postJson(Endpoint.OnFormPlacesKey, req)
+  assert.equal(rsp.status, 403)
+  assert.equal(redisValues.get(PLACES_KEY), 'test-api-key')
 })
 
 test('default area menu action: offers to name a place when none is stored', async () => {
@@ -995,6 +1055,7 @@ test('default area menu action: says which setting comes first without a key', a
 })
 
 test('default area form: a single match is stored without a second form', async () => {
+  seedModerator()
   const req: DefaultAreaFormReq = {place: 'Central Park'}
   const rsp = await postJson(Endpoint.OnFormDefaultArea, req)
   assert.equal(rsp.status, 200)
@@ -1012,6 +1073,7 @@ test('default area form: a single match is stored without a second form', async 
 })
 
 test('default area form: several matches are offered as a pick', async () => {
+  seedModerator()
   placesRspPlaces = [SPRINGFIELD_IL, SPRINGFIELD_MA]
 
   const req: DefaultAreaFormReq = {place: 'Springfield'}
@@ -1030,6 +1092,7 @@ test('default area form: several matches are offered as a pick', async () => {
 })
 
 test('default area pick form: stores the rectangle that was picked', async () => {
+  seedModerator()
   const req: DefaultAreaPickFormReq = {
     area: [
       JSON.stringify({
@@ -1055,6 +1118,7 @@ test('default area pick form: stores the rectangle that was picked', async () =>
 })
 
 test('default area pick form: an answer that is not an area changes nothing', async () => {
+  seedModerator()
   seedArea()
 
   // The pick made a round trip through a client, so it is parsed rather than
@@ -1074,6 +1138,7 @@ test('default area pick form: an answer that is not an area changes nothing', as
 })
 
 test('default area form: a place Google does not know changes nothing', async () => {
+  seedModerator()
   seedArea()
   placesRspPlaces = []
 
@@ -1086,6 +1151,7 @@ test('default area form: a place Google does not know changes nothing', async ()
 })
 
 test('default area form: a place with no viewport is not an area', async () => {
+  seedModerator()
   // Google answers, but with nothing to frame. Squaring a rectangle off around
   // the point would be this app guessing a zoom level; see ADR-0012.
   placesRspPlaces = [{displayName: {text: 'Somewhere'}}]
@@ -1098,6 +1164,7 @@ test('default area form: a place with no viewport is not an area', async () => {
 })
 
 test('default area form: a blank place leaves the stored area alone', async () => {
+  seedModerator()
   seedArea()
 
   const req: DefaultAreaFormReq = {place: '  '}
@@ -1109,6 +1176,7 @@ test('default area form: a blank place leaves the stored area alone', async () =
 })
 
 test('default area form: removing wins over anything typed alongside it', async () => {
+  seedModerator()
   seedArea()
 
   const req: DefaultAreaFormReq = {place: 'Tokyo', remove: true}
@@ -1120,6 +1188,7 @@ test('default area form: removing wins over anything typed alongside it', async 
 })
 
 test('default area form: an unreachable Google changes nothing', async () => {
+  seedModerator()
   seedArea()
   placesRspStatus = 0
 
@@ -1130,6 +1199,27 @@ test('default area form: an unreachable Google changes nothing', async () => {
   const ui = (await rsp.json()) as UiResponse
   assert.match(toastText(ui), /could not be reached/)
   assert.match(redisValues.get(AREA_KEY) ?? '', /Springfield, IL, USA/)
+})
+
+test('default area form: a reader who does not moderate is forbidden', async () => {
+  const req: DefaultAreaFormReq = {place: 'Tokyo'}
+  const rsp = await postJson(Endpoint.OnFormDefaultArea, req)
+  assert.equal(rsp.status, 403)
+  assert.equal(placesReqs.length, 0)
+})
+
+test('default area pick form: a reader who does not moderate is forbidden', async () => {
+  const req: DefaultAreaPickFormReq = {
+    area: [
+      JSON.stringify({
+        name: 'Tokyo',
+        bounds: {west: 0, south: 0, east: 1, north: 1},
+      }),
+    ],
+  }
+  const rsp = await postJson(Endpoint.OnFormDefaultAreaPick, req)
+  assert.equal(rsp.status, 403)
+  assert.equal(redisValues.get(AREA_KEY), undefined)
 })
 
 test('get map: the default area rides along with every map', async () => {
@@ -1841,6 +1931,7 @@ test('create map post: rejects a blank title and one longer than Reddit allows',
 })
 
 test('index post form: creates a post on the index entrypoint and indexes nothing', async () => {
+  seedModerator()
   const req: IndexPostFormReq = {title: '  r/test_sub Community Maps  '}
   const rsp = await postJson(Endpoint.OnFormNewIndexPost, req)
   assert.equal(rsp.status, 200)
@@ -1856,8 +1947,16 @@ test('index post form: creates a post on the index entrypoint and indexes nothin
 })
 
 test('index post form: a blank title is retypable, not an error', async () => {
+  seedModerator()
   const rsp = await postJson(Endpoint.OnFormNewIndexPost, {title: '   '})
   assert.equal(rsp.status, 200)
+  assert.equal(submittedPostTitle, undefined)
+})
+
+test('index post form: a reader who does not moderate is forbidden', async () => {
+  const req: IndexPostFormReq = {title: 'r/test_sub Community Maps'}
+  const rsp = await postJson(Endpoint.OnFormNewIndexPost, req)
+  assert.equal(rsp.status, 403)
   assert.equal(submittedPostTitle, undefined)
 })
 

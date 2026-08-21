@@ -1,4 +1,4 @@
-import {redis} from '@devvit/web/server'
+import {redis, type TxClientLike} from '@devvit/web/server'
 import type {T2, T3} from '@devvit/web/shared'
 import {type MapArea, type Pin, parseMapArea} from '../shared/api.ts'
 import {HttpError} from './http-error.ts'
@@ -23,10 +23,29 @@ export async function dbCreateMap(
   ownerId: T2,
   meta: IndexMeta,
 ): Promise<MapData> {
-  await redis.set(ownerKey(t3), ownerId)
-  await redis.zAdd(INDEX_KEY, {member: t3, score: meta.createdAt})
-  await redis.hSet(INDEX_META_KEY, {[t3]: JSON.stringify(meta)})
+  await atomically(async tx => {
+    await tx.set(ownerKey(t3), ownerId)
+    await tx.zAdd(INDEX_KEY, {member: t3, score: meta.createdAt})
+    await tx.hSet(INDEX_META_KEY, {[t3]: JSON.stringify(meta)})
+  })
   return {ownerId, pins: []}
+}
+
+/**
+ * Runs `queue` against a MULTI/EXEC transaction, so its writes land together
+ * or not at all — a crash or timeout partway through used to be able to leave
+ * some of them applied and others not. Nothing is WATCHed: these callers
+ * don't make a decision that a concurrent write could go stale, they just
+ * need their own writes batched, so there is nothing to invalidate the
+ * transaction and nothing to retry.
+ */
+async function atomically(
+  queue: (tx: TxClientLike) => Promise<unknown>,
+): Promise<void> {
+  const tx = await redis.watch()
+  await tx.multi()
+  await queue(tx)
+  await tx.exec()
 }
 
 /**
@@ -41,12 +60,15 @@ export async function dbIsMap(t3: T3): Promise<boolean> {
 
 export async function dbAddPin(t3: T3, pin: Pin): Promise<void> {
   await requireOwnerExists(t3)
-  const added = await redis.hSet(pinsKey(t3), {[pin.id]: JSON.stringify(pin)})
-  // Incremented rather than recounted so two adds in flight at once can't
-  // settle on the same total, and only when the field was new so a replayed
-  // add doesn't inflate it. A Map with no Pins is not listed, so this count is
-  // what decides whether the Map Post appears in a Listing at all.
-  if (added > 0) await redis.zIncrBy(INDEX_PINS_KEY, t3, added)
+  // `pin.id` is a fresh `crypto.randomUUID()` from the caller, so this field
+  // is always new — the write below always wants the increment. It still goes
+  // through one transaction with the hSet: a crash between the two used to be
+  // able to leave the pin hash and the cached count disagreeing about whether
+  // a Map with Pins was listed.
+  await atomically(async tx => {
+    await tx.hSet(pinsKey(t3), {[pin.id]: JSON.stringify(pin)})
+    await tx.zIncrBy(INDEX_PINS_KEY, t3, 1)
+  })
 }
 
 export async function dbUpdatePin(
@@ -62,10 +84,28 @@ export async function dbUpdatePin(
   return pin
 }
 
+/**
+ * Unlike {@link dbAddPin}'s field, `id` is client-chosen and may already be
+ * gone — from a second click, a retry, or someone else's request — so whether
+ * to decrement is a real decision, not a given. It is made by reading the
+ * field just before writing, inside a transaction WATCHing the hash: if
+ * another write to this Map's Pins lands in between, that read may now be
+ * stale, so the whole read-decide-write cycle is discarded and run again
+ * rather than risking a decrement for a Pin someone else already removed (or
+ * skipping one for a Pin that is still there).
+ */
 export async function dbDeletePin(t3: T3, id: string): Promise<void> {
   await requireOwnerExists(t3)
-  const deleted = await redis.hDel(pinsKey(t3), [id])
-  if (deleted > 0) await redis.zIncrBy(INDEX_PINS_KEY, t3, -deleted)
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const existed = !!(await redis.hGet(pinsKey(t3), id))
+    if (!existed) return
+    const tx = await redis.watch(pinsKey(t3))
+    await tx.multi()
+    await tx.hDel(pinsKey(t3), [id])
+    await tx.zIncrBy(INDEX_PINS_KEY, t3, -1)
+    if ((await tx.exec()).length) return
+  }
+  throw new HttpError(409, 'too much contention deleting this pin, try again')
 }
 
 /**
