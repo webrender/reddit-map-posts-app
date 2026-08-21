@@ -155,9 +155,13 @@ const fitPadding = 60
 
 /**
  * The same for a Preview, which is a fraction of the height and has no toolbar
- * or Sidebar to hold the Pins clear of.
+ * or Sidebar to hold the Pins clear of — but does have its own passengers a
+ * bare point doesn't: the default Marker rises 41px above the Pin it marks,
+ * the permanent Label (see {@link createMarker}) hangs roughly 20px below it
+ * and can run up to 8rem wide, and the Open Map button stands over the
+ * bottom ~90px of the card no matter what Pin is under it.
  */
-const previewFitPadding = 24
+const previewFitPadding = {top: 56, bottom: 130, left: 64, right: 64}
 
 /** How long a message that reports something that already happened stays up. */
 const flashStatusMs = 4000
