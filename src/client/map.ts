@@ -20,6 +20,7 @@ import {
   type AddPinReq,
   deletePostForm,
   type LatLng,
+  type MapArea,
   type Pin,
   type PlaceResult,
   type UpdatePinReq,
@@ -191,6 +192,11 @@ let map: MapLibreMap
 let isPreview = false
 let isOwner = false
 let pins: Pin[] = []
+/**
+ * Where a Map with nothing to frame opens, set by a moderator for the whole
+ * subreddit and absent where none has. See ADR-0012.
+ */
+let defaultArea: MapArea | undefined
 const markers = new Map<string, Marker>()
 
 let activeCategory = ''
@@ -248,6 +254,7 @@ async function init(): Promise<void> {
 
   isOwner = data.isOwner
   pins = data.pins
+  defaultArea = data.defaultArea
   document.body.classList.toggle('viewer-mode', !isOwner)
   // Hidden until the Map says whose it is, so a Viewer never sees it flicker
   // past on the way to being hidden. The Preview has no toolbar at all.
@@ -325,18 +332,41 @@ function render(): void {
 
 /**
  * Frames every Pin currently shown, which is what the Map loads with and what
- * it returns to whenever nothing is selected.
+ * it returns to whenever nothing is selected. With nothing to frame it falls
+ * back to the subreddit's Default Area, and with no area to the whole world the
+ * Map was constructed on.
  */
 function fitToPins(animate: boolean = false): void {
   const visible = filterPins(pins, activeCategory)
-  if (!visible.length) return
-  const bounds = new LngLatBounds()
-  for (const pin of visible) bounds.extend([pin.location.lng, pin.location.lat])
+  const bounds = visible.length ? pinBounds(visible) : areaBounds(defaultArea)
+  if (!bounds) return
   map.fitBounds(bounds, {
     padding: isPreview ? previewFitPadding : fitPadding,
     maxZoom: 14,
     duration: animate ? 600 : 0,
   })
+}
+
+function pinBounds(visible: readonly Pin[]): LngLatBounds {
+  const bounds = new LngLatBounds()
+  for (const pin of visible) bounds.extend([pin.location.lng, pin.location.lat])
+  return bounds
+}
+
+/**
+ * The Default Area as MapLibre wants it. An area that crosses the antimeridian
+ * arrives with its west edge numerically east of its east edge, which is how
+ * Google spells one; MapLibre reads that as a rectangle the other way round, so
+ * the east edge is carried past 180 instead — without which a Map of Fiji would
+ * open on every longitude except its own.
+ */
+function areaBounds(area: MapArea | undefined): LngLatBounds | undefined {
+  if (!area) return
+  const {west, south, east, north} = area.bounds
+  return new LngLatBounds(
+    [west, south],
+    [east < west ? east + 360 : east, north],
+  )
 }
 
 function renderMarkers(visible: Pin[]): void {

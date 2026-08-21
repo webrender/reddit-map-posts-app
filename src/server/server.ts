@@ -12,10 +12,16 @@ import {
   type AddPinRsp,
   type CreateMapPostReq,
   type CreateMapPostRsp,
+  DefaultAreaFormName,
+  type DefaultAreaFormReq,
+  DefaultAreaPickFormName,
+  type DefaultAreaPickFormReq,
   type DeleteIndexPostRsp,
   type DeletePinReq,
   type DeletePinRsp,
   type DeletePostRsp,
+  defaultAreaForm,
+  defaultAreaPickForm,
   defaultIndexPostTitle,
   defaultMapPostTitle,
   Endpoint,
@@ -30,6 +36,7 @@ import {
   IndexSort,
   indexPostForm,
   isIndexSort,
+  type MapArea,
   NewPostFormName,
   type NewPostFormReq,
   newPostForm,
@@ -37,6 +44,7 @@ import {
   PlacesKeyFormName,
   type PlacesKeyFormReq,
   PostTitleMaxLen,
+  parseMapArea,
   type SearchPlacesRsp,
   type UpdatePinReq,
   type UpdatePinRsp,
@@ -44,15 +52,18 @@ import {
 import {
   dbAddPin,
   dbCreateMap,
+  dbDeleteDefaultArea,
   dbDeleteMap,
   dbDeletePin,
   dbDeletePlacesApiKey,
+  dbGetDefaultArea,
   dbGetIndex,
   dbGetMap,
   dbGetPlacesApiKey,
   dbGetScoreCursor,
   dbIsMap,
   dbSetCachedScores,
+  dbSetDefaultArea,
   dbSetPlacesApiKey,
   dbSetScoreCursor,
   dbUnlistMap,
@@ -61,7 +72,7 @@ import {
   type MapData,
 } from './db.ts'
 import {HttpError} from './http-error.ts'
-import {checkPlacesApiKey, searchPlaces} from './places.ts'
+import {checkPlacesApiKey, searchAreas, searchPlaces} from './places.ts'
 import {proxyGet} from './proxy.ts'
 
 /**
@@ -179,6 +190,15 @@ async function route(
       case Endpoint.OnFormPlacesKey:
         rsp = await routeFormPlacesKey(reqMsg)
         break
+      case Endpoint.OnMenuDefaultArea:
+        rsp = await routeMenuDefaultArea()
+        break
+      case Endpoint.OnFormDefaultArea:
+        rsp = await routeFormDefaultArea(reqMsg)
+        break
+      case Endpoint.OnFormDefaultAreaPick:
+        rsp = await routeFormDefaultAreaPick(reqMsg)
+        break
       case Endpoint.OnTaskRefreshScores:
         rsp = await routeRefreshScores()
         break
@@ -195,11 +215,17 @@ async function routeGetMap(): Promise<GetMapRsp> {
   const t3 = requirePostId()
   const map = await dbGetMap(t3)
   if (!map) throw new HttpError(404, 'map not found')
-  return {
+  const rsp: GetMapRsp = {
     ownerId: map.ownerId,
     pins: map.pins,
     isOwner: map.ownerId === context.userId,
   }
+  // Read for every Map, not only the empty ones: a Map that loses its last Pin
+  // while the page is open needs somewhere to go, and the Default Area is one
+  // Redis read against the two this route already makes.
+  const defaultArea = await dbGetDefaultArea()
+  if (defaultArea) rsp.defaultArea = defaultArea
+  return rsp
 }
 
 async function routeAddPin(reqMsg: IncomingMessage): Promise<AddPinRsp> {
@@ -280,7 +306,8 @@ async function routeSearchPlaces(
     )
   }
 
-  return {results: await searchPlaces(query, apiKey)}
+  const area = await dbGetDefaultArea()
+  return {results: await searchPlaces(query, apiKey, area?.bounds)}
 }
 
 /**
@@ -653,6 +680,108 @@ async function routeFormPlacesKey(
       check === 'ok'
         ? {text: 'Places API key saved.', appearance: 'success'}
         : {text: 'Key saved, but Google could not be reached to check it.'},
+  }
+}
+
+/**
+ * Setting a Default Area begins with a place search, so it needs the same key
+ * Place Search does. Without one there is nothing the form could look up, so
+ * the moderator is told which setting comes first rather than being asked for a
+ * place and refused afterwards.
+ */
+async function routeMenuDefaultArea(): Promise<UiResponse> {
+  if (!(await dbGetPlacesApiKey())) {
+    return {
+      showToast: {
+        text: 'Set the Google Places API key first — the default area is looked up with it.',
+      },
+    }
+  }
+  const area = await dbGetDefaultArea()
+  return {
+    showForm: {name: DefaultAreaFormName, form: defaultAreaForm(area?.name)},
+  }
+}
+
+/**
+ * The first half of setting a Default Area: turn what the moderator typed into
+ * the places Google thinks they meant. Nothing is stored here unless there was
+ * only one of those, because storing the first of several would be this app
+ * guessing which Springfield a subreddit is about.
+ */
+async function routeFormDefaultArea(
+  reqMsg: IncomingMessage,
+): Promise<UiResponse> {
+  const req = await readJson<DefaultAreaFormReq>(reqMsg)
+  const place = req.place?.trim()
+
+  // Checked before the place, for the reason the Places API key form checks it
+  // first: ticking the box should do what it says even alongside typing.
+  if (req.remove) {
+    await dbDeleteDefaultArea()
+    return {
+      showToast: {
+        text: 'Default map area removed. New maps open on the whole world.',
+        appearance: 'success',
+      },
+    }
+  }
+  if (!place) return {showToast: {text: 'No change: no place was entered.'}}
+
+  const apiKey = await dbGetPlacesApiKey()
+  if (!apiKey) {
+    return {
+      showToast: {text: 'No change: this subreddit has no Places API key.'},
+    }
+  }
+
+  let areas: MapArea[]
+  try {
+    areas = await searchAreas(place, apiKey)
+  } catch (err) {
+    console.error(`default area search failed; ${err}`)
+    return {
+      showToast: {text: 'Google could not be reached, so nothing was changed.'},
+    }
+  }
+
+  const [first] = areas
+  if (!first) return {showToast: {text: `No place found for “${place}”.`}}
+  // One match is not a choice, so it is not offered as one.
+  if (areas.length === 1) return await storeDefaultArea(first)
+
+  return {
+    showForm: {name: DefaultAreaPickFormName, form: defaultAreaPickForm(areas)},
+  }
+}
+
+/**
+ * The second half: the moderator's pick, which arrives as the same JSON the
+ * pick form put in the option. It is parsed rather than trusted — it made a
+ * round trip through a client — and an unreadable answer changes nothing.
+ */
+async function routeFormDefaultAreaPick(
+  reqMsg: IncomingMessage,
+): Promise<UiResponse> {
+  const req = await readJson<DefaultAreaPickFormReq>(reqMsg)
+  const [chosen] = req.area ?? []
+  const area = chosen ? parseMapArea(chosen) : undefined
+  if (!area) return {showToast: {text: 'No change: no place was picked.'}}
+  return await storeDefaultArea(area)
+}
+
+/**
+ * Where both halves end up. The toast names the place, because the moderator
+ * typed a word and what got stored is a rectangle — the name is the only part
+ * of it they can check.
+ */
+async function storeDefaultArea(area: MapArea): Promise<UiResponse> {
+  await dbSetDefaultArea(area)
+  return {
+    showToast: {
+      text: `New maps will open on ${area.name}.`,
+      appearance: 'success',
+    },
   }
 }
 

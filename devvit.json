@@ -39,6 +39,13 @@
         "endpoint": "/internal/on/menu/places-key"
       },
       {
+        "label": "[map-posts] Set default map area",
+        "description": "Choose the part of the world new maps open on before they have any pins.",
+        "location": "subreddit",
+        "forUserType": "moderator",
+        "endpoint": "/internal/on/menu/default-area"
+      },
+      {
         "label": "[map-posts] New index post",
         "description": "Create a post that lists every map on this subreddit. Pin it to the top.",
         "location": "subreddit",
@@ -50,6 +57,8 @@
   "forms": {
     "newPost": "/internal/on/form/new-post",
     "placesKey": "/internal/on/form/places-key",
+    "defaultArea": "/internal/on/form/default-area",
+    "defaultAreaPick": "/internal/on/form/default-area-pick",
     "newIndexPost": "/internal/on/form/new-index-post"
   },
   "scheduler": {

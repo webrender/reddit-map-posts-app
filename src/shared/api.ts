@@ -5,6 +5,76 @@ export type ErrorRsp = {error: string; status: number}
 
 export type LatLng = {lat: number; lng: number}
 
+/**
+ * A rectangle of the world, in the corners a Google Places viewport gives. On
+ * an area that crosses the antimeridian `west` is greater than `east`, which is
+ * how Google spells it and what every reader here has to allow for.
+ */
+export type MapBounds = {
+  west: number
+  south: number
+  east: number
+  north: number
+}
+
+/**
+ * The general area a subreddit's Maps open on before they hold any Pins. It is
+ * a rectangle rather than a centre and a zoom so that one setting frames the
+ * same place in a Preview and full screen alike. See ADR-0012.
+ */
+export type MapArea = {
+  /** What Google called the place, echoed back to whoever set it. */
+  name: string
+  bounds: MapBounds
+}
+
+/**
+ * Reads a {@link MapArea} back out of JSON, answering `undefined` for anything
+ * that is not one. Both callers read from somewhere they cannot vouch for — a
+ * Redis value written by an older version of this app, and a form value that
+ * made a round trip through a moderator's client — so neither may assume the
+ * shape it gets back.
+ */
+export function parseMapArea(json: string): MapArea | undefined {
+  let value: unknown
+  try {
+    value = JSON.parse(json)
+  } catch {
+    return
+  }
+  if (typeof value !== 'object' || value === null) return
+  const {name, bounds} = value as {name?: unknown; bounds?: unknown}
+  if (typeof name !== 'string' || !name.trim()) return
+  if (typeof bounds !== 'object' || bounds === null) return
+
+  const {west, south, east, north} = bounds as {
+    west?: unknown
+    south?: unknown
+    east?: unknown
+    north?: unknown
+  }
+  if (!isLng(west) || !isLng(east) || !isLat(south) || !isLat(north)) return
+  // A rectangle may be inverted east-to-west, and that means something; being
+  // inverted north-to-south means nothing, so it is not a rectangle.
+  if (south > north) return
+
+  return {name, bounds: {west, south, east, north}}
+}
+
+function isLat(value: unknown): value is number {
+  return (
+    typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= 90
+  )
+}
+
+function isLng(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isFinite(value) &&
+    Math.abs(value) <= 180
+  )
+}
+
 /** A single marked location on a Map. */
 export type Pin = {
   id: string
@@ -36,7 +106,18 @@ export type PinInput = {
 }
 
 /** The current Map state for this post. */
-export type GetMapRsp = {ownerId: T2; pins: Pin[]; isOwner: boolean}
+export type GetMapRsp = {
+  ownerId: T2
+  pins: Pin[]
+  isOwner: boolean
+  /**
+   * The subreddit's Default Area, absent where no moderator has set one. Only a
+   * Map with nothing to frame ever opens on it, but it rides along with every
+   * Map: a Map that loses its last Pin is the same empty Map as one that never
+   * had any, and it should land in the same place.
+   */
+  defaultArea?: MapArea
+}
 
 export type AddPinReq = PinInput
 export type AddPinRsp = {pin: Pin}
@@ -255,6 +336,93 @@ export const PlacesKeyFormName = 'placesKey'
  */
 export type PlacesKeyFormReq = {key?: string; remove?: boolean}
 
+/**
+ * Names the form a moderator uses to look for this subreddit's Default Area.
+ * It is the first of two: this one asks what to look for, and
+ * {@link DefaultAreaPickFormName} asks which of the answers was meant.
+ */
+export const DefaultAreaFormName = 'defaultArea'
+
+/** Names the form that follows it, where the moderator picks one match. */
+export const DefaultAreaPickFormName = 'defaultAreaPick'
+
+/**
+ * A submitted Default Area search. Blank means "leave the stored area alone",
+ * for the same reason the Places API key form's blank does: the field cannot be
+ * pre-filled with a place the moderator could edit, so clearing needs its own
+ * gesture rather than a meaning for empty.
+ */
+export type DefaultAreaFormReq = {place?: string; remove?: boolean}
+
+/**
+ * A submitted pick. Devvit hands a `select` back as an array however few it
+ * allows, and each value is one {@link MapArea} as JSON — the candidates ride
+ * out in the form and back in the answer rather than waiting in Redis, so a
+ * moderator who abandons the second form leaves nothing behind.
+ */
+export type DefaultAreaPickFormReq = {area?: string[]}
+
+/** How many matches the pick form offers. Enough to disambiguate, not a page. */
+export const DefaultAreaMaxResults = 5
+
+/**
+ * The Default Area search form. Its description reports the stored area, which
+ * is safe in a way the Places API key never is: the whole point of an area is
+ * that everyone can see where the Maps open.
+ */
+export function defaultAreaForm(storedName: string | undefined): Form {
+  return {
+    title: 'Default map area',
+    description: storedName
+      ? `New maps open on ${storedName}. Searching for another place replaces it.`
+      : 'New maps with no pins on them open on the whole world. Name a place to open them there instead.',
+    acceptLabel: 'Search',
+    fields: [
+      {
+        type: 'string',
+        name: 'place',
+        label: 'Place',
+        placeholder: 'Europe, Hawaii, Tokyo…',
+        helpText: 'A region, country, state, island, or city.',
+      },
+      {
+        type: 'boolean',
+        name: 'remove',
+        label: 'Remove the stored area instead',
+        defaultValue: false,
+      },
+    ],
+  }
+}
+
+/**
+ * The second half: which of the places Google offered was meant. A search that
+ * matched exactly one place skips this form, since there is nothing there to
+ * pick, so it is only ever shown with two or more.
+ */
+export function defaultAreaPickForm(areas: readonly MapArea[]): Form {
+  const options = areas.map(area => ({
+    label: area.name,
+    value: JSON.stringify(area),
+  }))
+  return {
+    title: 'Which place?',
+    description:
+      'New maps with no pins on them will open on the place you pick.',
+    acceptLabel: 'Use this area',
+    fields: [
+      {
+        type: 'select',
+        name: 'area',
+        label: 'Place',
+        required: true,
+        options,
+        defaultValue: options[0] ? [options[0].value] : [],
+      },
+    ],
+  }
+}
+
 export type Endpoint = (typeof Endpoint)[keyof typeof Endpoint]
 export const Endpoint = {
   GetMap: 'api/map',
@@ -278,6 +446,9 @@ export const Endpoint = {
   OnFormNewIndexPost: 'internal/on/form/new-index-post',
   OnMenuPlacesKey: 'internal/on/menu/places-key',
   OnFormPlacesKey: 'internal/on/form/places-key',
+  OnMenuDefaultArea: 'internal/on/menu/default-area',
+  OnFormDefaultArea: 'internal/on/form/default-area',
+  OnFormDefaultAreaPick: 'internal/on/form/default-area-pick',
   OnTaskRefreshScores: 'internal/on/task/refresh-scores',
 } as const
 
@@ -298,5 +469,8 @@ export const EndpointMethod = {
   [Endpoint.OnFormNewIndexPost]: 'POST',
   [Endpoint.OnMenuPlacesKey]: 'POST',
   [Endpoint.OnFormPlacesKey]: 'POST',
+  [Endpoint.OnMenuDefaultArea]: 'POST',
+  [Endpoint.OnFormDefaultArea]: 'POST',
+  [Endpoint.OnFormDefaultAreaPick]: 'POST',
   [Endpoint.OnTaskRefreshScores]: 'POST',
 } as const satisfies {[endpoint: string]: 'GET' | 'POST'}

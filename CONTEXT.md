@@ -62,6 +62,10 @@ The secondary way to add a Pin: the Owner clicks directly on the Map to place a 
 The Google Places API key that makes Place Search work, one per subreddit, supplied by a moderator through a masked form and stored where only the server can reach it. It travels in one direction: the app can tell you whether a key exists, never what it is, and replacing or removing it is the only thing a moderator can do to one. See ADR-0009.
 _Avoid_: Setting, secret (it is neither — Devvit's own settings can't mask a per-subreddit value, and its Secrets are app-wide)
 
+**Default Area**:
+The part of the world a subreddit's Maps open on when they have no Pins to frame — Europe, Hawaii, Tokyo — set by a moderator from the subreddit menu and held for the whole install, one per subreddit like the Places API Key. It is a rectangle rather than a place and a zoom: the moderator names a place, what gets stored is Google's own box around it, and each Map solves for the zoom that fits that box in the space it has, so one setting frames the same area in a Preview and full screen alike. Naming it takes two steps, a search and then a pick, because one word is usually several places and this app is not the one to choose between them. It needs a Places API Key, since looking a place up is a place search, and it repays that by biasing Place Search towards itself — near places rank first, distant ones are still findable. It is read live rather than copied into a Map Post as it is made, so correcting it corrects every empty Map at once, and where none is set a Map opens on the whole world, as every Map used to. See ADR-0012.
+_Avoid_: Home view, default zoom (both name a camera, and what is stored is a place); bounding box, viewport (the mechanism, not the setting)
+
 **Category**:
 A label an Owner assigns to a Pin, drawn from that Map's own accumulating set of categories rather than a fixed predefined list — typing a new name creates it, typing an existing one reuses it. A Pin has exactly one Category (never zero-to-many), which is what makes sorting and filtering a Map by Category well-defined. The set of categories isn't a separately managed entity — it's just the distinct Category values currently in use across the Map's Pins.
 
@@ -74,7 +78,7 @@ One Pin's entry in the Sidebar, showing that Pin's full details. Pin Cards are g
 _Avoid_: Row, list item, entry
 
 **Selected Pin**:
-The single Pin the Map and the Sidebar are both currently focused on, or none. Selection is shared state, so the two views can never disagree about it, but what selecting does — zooming the Map, scrolling the Sidebar, both, or neither — depends on how the Pin came to be selected. Selecting the Selected Pin again lets go of it, and with nothing selected the Map frames every Pin it is showing, which is also how it loads. Only the Selected Pin's marker can be dragged, and only by the Owner, and only if it came from a Manual Pin Drop.
+The single Pin the Map and the Sidebar are both currently focused on, or none. Selection is shared state, so the two views can never disagree about it, but what selecting does — zooming the Map, scrolling the Sidebar, both, or neither — depends on how the Pin came to be selected. Selecting the Selected Pin again lets go of it, and with nothing selected the Map frames every Pin it is showing, which is also how it loads — or the subreddit's Default Area, when there is no Pin to frame. Only the Selected Pin's marker can be dragged, and only by the Owner, and only if it came from a Manual Pin Drop.
 
 **Owner**:
 The Reddit user who created a Map Post. Only the Owner can add, edit, or delete Pins on that Post's Map, and only the Owner can Delete Map.

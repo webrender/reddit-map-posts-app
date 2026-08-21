@@ -1,6 +1,6 @@
 import {redis} from '@devvit/web/server'
 import type {T2, T3} from '@devvit/web/shared'
-import type {Pin} from '../shared/api.ts'
+import {type MapArea, type Pin, parseMapArea} from '../shared/api.ts'
 import {HttpError} from './http-error.ts'
 
 export type MapData = {ownerId: T2; pins: Pin[]}
@@ -184,10 +184,30 @@ export async function dbDeletePlacesApiKey(): Promise<void> {
 }
 
 /**
+ * The Default Area, or nothing where no moderator has set one — which is also
+ * the answer for a value this version of the app cannot read, since an
+ * unframeable area and a missing one leave a Map in the same place.
+ */
+export async function dbGetDefaultArea(): Promise<MapArea | undefined> {
+  const json = await redis.get(DEFAULT_AREA_KEY)
+  return json ? parseMapArea(json) : undefined
+}
+
+export async function dbSetDefaultArea(area: MapArea): Promise<void> {
+  await redis.set(DEFAULT_AREA_KEY, JSON.stringify(area))
+}
+
+export async function dbDeleteDefaultArea(): Promise<void> {
+  await redis.del(DEFAULT_AREA_KEY)
+}
+
+/**
  * Unqualified by any post id: these belong to the install, not to a Map. Redis
  * is installation-scoped, so one unqualified key is already one per subreddit.
  */
 const PLACES_API_KEY = 'places-api-key'
+/** The subreddit's Default Area, as {@link MapArea} JSON. Install-scoped too. */
+const DEFAULT_AREA_KEY = 'default-area'
 /** Map Post id -> created-at ms. The set of Maps this subreddit knows about. */
 const INDEX_KEY = 'index'
 /** Map Post id -> {@link IndexMeta} JSON. */
