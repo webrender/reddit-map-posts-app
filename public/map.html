@@ -57,6 +57,9 @@
     }
     #toolbar {
       grid-area: toolbar;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
       padding: 0.5rem;
       background: var(--bg);
       border-bottom: 1px solid var(--border);
@@ -67,18 +70,21 @@
     /* The three faces of the toolbar: the controls, the add-a-pin row, and the
        category filter — each of the latter two taking the controls' place while
        it is open. Only ever one of them is in the flow, and none of them wraps,
-       so the toolbar keeps its one-row height whichever is showing. */
+       so the toolbar keeps its one-row height whichever is showing. The Sidebar
+       toggle lives outside all three, so it survives whichever face is up. */
     #toolbar-main,
     #toolbar-pin,
     #toolbar-filter {
       display: flex;
       align-items: center;
       gap: 0.5rem;
-    }
-    /* Holds the Sidebar toggle at one end of the toolbar and the Map's own
-       controls at the other, now that no field sits between them. */
-    .toolbar-spacer {
       flex: 1 1 auto;
+      min-width: 0;
+    }
+    /* Pushes the controls to the end of the row now that the Sidebar toggle
+       sits outside this face rather than at its start. */
+    #toolbar-main {
+      justify-content: flex-end;
     }
     button {
       display: inline-flex;
@@ -581,25 +587,24 @@
   <body>
     <div id="app">
       <header id="toolbar">
+        <button
+          id="sidebar-toggle"
+          type="button"
+          aria-expanded="false"
+          aria-controls="sidebar"
+          aria-label="Show pins"
+        >
+          <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+            <path
+              d="M3 5.5h14M3 10h14M3 14.5h14"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.75"
+              stroke-linecap="round"
+            />
+          </svg>
+        </button>
         <div id="toolbar-main">
-          <button
-            id="sidebar-toggle"
-            type="button"
-            aria-expanded="false"
-            aria-controls="sidebar"
-            aria-label="Show pins"
-          >
-            <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
-              <path
-                d="M3 5.5h14M3 10h14M3 14.5h14"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.75"
-                stroke-linecap="round"
-              />
-            </svg>
-          </button>
-          <span class="toolbar-spacer"></span>
           <button id="add-pin-btn" type="button" aria-label="Add a pin">
             <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
               <path
