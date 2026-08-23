@@ -1,6 +1,6 @@
 import {redis, type TxClientLike} from '@devvit/web/server'
 import type {T2, T3} from '@devvit/web/shared'
-import {type MapArea, type Pin, parseMapArea} from '../shared/api.ts'
+import {type MapBounds, type Pin, parseMapBounds} from '../shared/api.ts'
 import {HttpError} from './http-error.ts'
 
 export type MapData = {ownerId: T2; pins: Pin[]}
@@ -226,36 +226,20 @@ export async function dbSetScoreCursor(cursor: number): Promise<void> {
 }
 
 /**
- * The Places API key is written by a moderator and read only by
- * `search places`; nothing ever hands it back out. Redis is
- * installation-scoped, so this is one key per subreddit — the cost isolation
- * ADR-0002 wanted, without the plaintext settings field it had to accept to
- * get it.
- */
-export async function dbGetPlacesApiKey(): Promise<string | undefined> {
-  return await redis.get(PLACES_API_KEY)
-}
-
-export async function dbSetPlacesApiKey(key: string): Promise<void> {
-  await redis.set(PLACES_API_KEY, key)
-}
-
-export async function dbDeletePlacesApiKey(): Promise<void> {
-  await redis.del(PLACES_API_KEY)
-}
-
-/**
  * The Default Area, or nothing where no moderator has set one — which is also
  * the answer for a value this version of the app cannot read, since an
- * unframeable area and a missing one leave a Map in the same place.
+ * unframeable area and a missing one leave a Map in the same place. A
+ * subreddit whose area was looked up by the version that asked Google is in
+ * exactly that position, and clearing it is what takes the stale value out of
+ * Redis; see {@link parseMapBounds}.
  */
-export async function dbGetDefaultArea(): Promise<MapArea | undefined> {
+export async function dbGetDefaultArea(): Promise<MapBounds | undefined> {
   const json = await redis.get(DEFAULT_AREA_KEY)
-  return json ? parseMapArea(json) : undefined
+  return json ? parseMapBounds(json) : undefined
 }
 
-export async function dbSetDefaultArea(area: MapArea): Promise<void> {
-  await redis.set(DEFAULT_AREA_KEY, JSON.stringify(area))
+export async function dbSetDefaultArea(bounds: MapBounds): Promise<void> {
+  await redis.set(DEFAULT_AREA_KEY, JSON.stringify(bounds))
 }
 
 export async function dbDeleteDefaultArea(): Promise<void> {
@@ -263,11 +247,10 @@ export async function dbDeleteDefaultArea(): Promise<void> {
 }
 
 /**
- * Unqualified by any post id: these belong to the install, not to a Map. Redis
- * is installation-scoped, so one unqualified key is already one per subreddit.
+ * The subreddit's Default Area, as {@link MapBounds} JSON. Unqualified by any
+ * post id because it belongs to the install rather than to a Map, and Redis is
+ * installation-scoped — so one unqualified key is already one per subreddit.
  */
-const PLACES_API_KEY = 'places-api-key'
-/** The subreddit's Default Area, as {@link MapArea} JSON. Install-scoped too. */
 const DEFAULT_AREA_KEY = 'default-area'
 /** Map Post id -> created-at ms. The set of Maps this subreddit knows about. */
 const INDEX_KEY = 'index'

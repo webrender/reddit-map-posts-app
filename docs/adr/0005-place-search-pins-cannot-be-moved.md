@@ -1,5 +1,7 @@
 # A Place Search Pin's location cannot be moved
 
+> **Superseded by ADR-0013.** With Place Search gone there is only one kind of Pin, and its Location is always the Owner's own — so every Pin is draggable again and `Pin.fromPlaceSearch` no longer exists. Kept because the rule it states is the right one for any Location this app did not get from the Owner, should there ever be one again.
+
 ADR-0004 made the Selected Pin's marker draggable for the Owner. That is right for a Manual Pin Drop, where the Owner picked the coordinates by clicking and the drag is just a second, more accurate click. It is wrong for a Place Search Pin: those coordinates came from Google for a named place, so dragging one only ever makes the Pin disagree with its own Title. Now a Pin records which add-path created it (`Pin.fromPlaceSearch`), and only Manual Pin Drop Pins are draggable.
 
 This costs the glossary its "a Pin is identical however it was added" line, which is the reason the flag is on the Pin rather than inferred. There is nothing to infer from — a Place Search Pin keeps no place id, name, or other trace of Google (see ADR-0002 on how little is fetched), and its Title is free for the Owner to rewrite immediately after adding. Something has to be stored, and one boolean is the smallest thing that answers the one question being asked.

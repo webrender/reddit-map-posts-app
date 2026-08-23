@@ -2,10 +2,11 @@ import type {IncomingHttpHeaders} from 'node:http'
 import {HttpError} from './http-error.ts'
 
 /**
- * Hosts the webview may reach through the proxy. This is deliberately narrower
- * than devvit.json's `permissions.http.domains`: `places.googleapis.com` is
- * reachable from the server but not through here, because place search needs
- * the subreddit's API key attached server-side and has its own endpoint.
+ * Hosts the webview may reach through the proxy. It is a separate list from
+ * devvit.json's `permissions.http.domains` on purpose, and may only ever be
+ * narrower: that one says where the server may go, this one says where a page
+ * may send it. A future reader adding an external host must add it in both
+ * places deliberately. See ADR-0003.
  */
 const ProxyHost: ReadonlySet<string> = new Set(['tiles.openfreemap.org'])
 

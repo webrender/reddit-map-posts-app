@@ -1,6 +1,6 @@
 # Terms & Conditions — Map Posts
 
-**Effective date:** 10 August 2026
+**Effective date:** 22 August 2026
 **Applies to:** the Map Posts app (`map-posts`) for the Reddit Developer Platform
 
 These terms govern your use of the Map Posts app. By creating a map post, adding pins, or viewing a map created with the app, you agree to them. If you do not agree, do not use the app.
@@ -50,20 +50,17 @@ Content that breaks these rules may be removed, and the app may be made unavaila
 The app depends on services it does not operate, and your use of the app involves them:
 
 - **OpenFreeMap** supplies the map's base imagery. Its availability, accuracy, and terms are its own.
-- **Google Places API** powers place search, and is used only when a map owner types into the search box. Place search works only if the subreddit has configured an API key.
 - **Reddit** hosts the app, its data, and its uploaded images.
 
-If any of these services changes, becomes unavailable, or is withdrawn, the corresponding part of the app may stop working. Map data is not a substitute for authoritative maps and must not be relied on for navigation, emergency response, or any safety-critical purpose.
+No Google or Apple service is contacted. An earlier version of the app offered a place search backed by the Google Places API, which required an API key supplied by the installing subreddit; that feature and the obligations that came with it have been removed.
+
+The app can place a pin from a Google Maps or Apple Maps link **you** paste into it. The link is read in your own browser for the coordinates and place name it already contains; the app does not fetch it, follow it, or send it anywhere, and short share links are refused rather than resolved. You are responsible for the links you paste and for your own compliance with the terms of the service you copied one from, exactly as you are for any other content you add.
+
+If either of these services changes, becomes unavailable, or is withdrawn, the corresponding part of the app may stop working. Map data is not a substitute for authoritative maps and must not be relied on for navigation, emergency response, or any safety-critical purpose.
 
 ## 7. Obligations of installing subreddits
 
-A subreddit that installs the app and enables place search supplies its own Google Places API key. That subreddit's moderators are responsible for:
-
-- obtaining the key and complying with the [Google Maps Platform Terms of Service](https://cloud.google.com/maps-platform/terms);
-- all usage, quota, and billing incurred on that key;
-- securing the key — note that a subreddit-scoped setting is stored unmasked and is readable by that subreddit's moderators, as described in the [Privacy Policy](privacy.md).
-
-The app developer is not a party to your agreement with Google and is not responsible for charges on your key.
+A subreddit that installs the app supplies no keys, credentials, or paid services, and incurs no third-party charges through it. Its moderators are responsible for the ordinary things: whether the app is installed at all, whether the content on its maps meets the subreddit's rules and Reddit's, and — where they set one — the default map area every new map in the subreddit opens on.
 
 ## 8. Availability and changes
 
@@ -71,7 +68,7 @@ The app is offered as-is and as-available. It may be changed, suspended, or disc
 
 ## 9. No warranty
 
-**The app is provided "as is", without warranty of any kind**, express or implied, including any implied warranties of merchantability, fitness for a particular purpose, accuracy, or non-infringement. No promise is made that the app will be available, error-free, secure, or that the map data or place-search results will be accurate or current.
+**The app is provided "as is", without warranty of any kind**, express or implied, including any implied warranties of merchantability, fitness for a particular purpose, accuracy, or non-infringement. No promise is made that the app will be available, error-free, secure, or that the map data will be accurate or current.
 
 ## 10. Limitation of liability
 

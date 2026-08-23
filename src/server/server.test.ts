@@ -15,10 +15,6 @@ import {
   type AddPinRsp,
   type CreateMapPostReq,
   type CreateMapPostRsp,
-  DefaultAreaFormName,
-  type DefaultAreaFormReq,
-  DefaultAreaPickFormName,
-  type DefaultAreaPickFormReq,
   type DeleteIndexPostRsp,
   type DeletePinReq,
   type DeletePinRsp,
@@ -32,10 +28,8 @@ import {
   NewPostFormName,
   type NewPostFormReq,
   type Pin,
-  PlacesKeyFormName,
-  type PlacesKeyFormReq,
   PostTitleMaxLen,
-  type SearchPlacesRsp,
+  type SetDefaultAreaReq,
   type UpdatePinReq,
   type UpdatePinRsp,
 } from '../shared/api.ts'
@@ -44,9 +38,7 @@ import {onReq} from './server.ts'
 
 const OWNER = 't2_owner' as T2
 const POST = 't3_123' as T3
-/** Mirrors the install-scoped key `db.ts` writes the Places API key under. */
-const PLACES_KEY = 'places-api-key'
-/** And the one it writes the Default Area under. */
+/** Mirrors the install-scoped key `db.ts` writes the Default Area under. */
 const AREA_KEY = 'default-area'
 
 let server: Server
@@ -75,61 +67,15 @@ let requestUserId: T2 = OWNER
 let submittedPostTitle: string | undefined
 /** Which `post.entrypoints` key the last submitted post asked to render. */
 let submittedPostEntry: string | undefined
-/** The key the server presented to Google on the last place search. */
-let placesApiKeySent: string | null = null
-/** How Google answers the next place request; 0 means the request throws. */
-let placesRspStatus = 200
 /** Every external URL the server fetched, with the headers it forwarded. */
 let upstreamReqs: {url: string; headers: Headers}[] = []
-/** The places Google answers a text search with, whatever was searched for. */
-let placesRspPlaces: unknown[] = []
-/** Makes Google refuse any search carrying a `locationBias`, and only those. */
-let placesRejectBias = false
-/** Every text search the server made, as Google would have received it. */
-let placesReqs: {fieldMask: string | null; body: PlacesReqBody}[] = []
 
-type PlacesReqBody = {
-  textQuery?: string
-  maxResultCount?: number
-  locationBias?: {
-    rectangle: {
-      low: {latitude: number; longitude: number}
-      high: {latitude: number; longitude: number}
-    }
-  }
-}
-
-/**
- * One place as Google returns it, with every field either search asks for. A
- * viewport is Google's own rectangle for the place — the thing a Default Area
- * is made of.
- */
-const CENTRAL_PARK = {
-  displayName: {text: 'Central Park'},
-  formattedAddress: 'New York, NY, USA',
-  location: {latitude: 40.785091, longitude: -73.968285},
-  viewport: {
-    low: {latitude: 40.764, longitude: -73.9819},
-    high: {latitude: 40.8003, longitude: -73.9498},
-  },
-}
-
-/** The two places one word means, which is what the pick form is for. */
+/** A rectangle a moderator framed, as the client reads one off the Map. */
 const SPRINGFIELD_IL = {
-  displayName: {text: 'Springfield'},
-  formattedAddress: 'Springfield, IL, USA',
-  viewport: {
-    low: {latitude: 39.6907, longitude: -89.7343},
-    high: {latitude: 39.8607, longitude: -89.5807},
-  },
-}
-const SPRINGFIELD_MA = {
-  displayName: {text: 'Springfield'},
-  formattedAddress: 'Springfield, MA, USA',
-  viewport: {
-    low: {latitude: 42.0501, longitude: -72.6204},
-    high: {latitude: 42.1585, longitude: -72.4636},
-  },
+  west: -89.7343,
+  south: 39.6907,
+  east: -89.5807,
+  north: 39.8607,
 }
 
 const TILE_BYTES = Uint8Array.from([0x1a, 0x00, 0xff, 0x80, 0x0a])
@@ -278,24 +224,6 @@ before(async () => {
     url: string | URL | Request,
     init?: RequestInit,
   ) => {
-    if (`${url}` === 'https://places.googleapis.com/v1/places:searchText') {
-      const headers = new Headers(init?.headers)
-      placesApiKeySent = headers.get('X-Goog-Api-Key')
-      const body = JSON.parse(`${init?.body}`) as PlacesReqBody
-      placesReqs.push({fieldMask: headers.get('X-Goog-FieldMask'), body})
-      if (placesRspStatus === 0) throw new TypeError('network error')
-      if (placesRspStatus !== 200)
-        return new Response('{}', {status: placesRspStatus})
-      // Standing in for a rectangle Google will not take: the search itself is
-      // fine, and the same one without the bias would have worked.
-      if (placesRejectBias && body.locationBias)
-        return new Response('{}', {status: 400})
-      return new Response(JSON.stringify({places: placesRspPlaces}), {
-        status: 200,
-        headers: {'Content-Type': 'application/json'},
-      })
-    }
-
     const {host, pathname} = new URL(`${url}`)
     if (host === 'tiles.openfreemap.org') {
       const headers = new Headers(init?.headers)
@@ -374,12 +302,6 @@ beforeEach(() => {
   redditPosts.clear()
   deletedPosts = []
   requestUserId = OWNER
-  redisValues.set(PLACES_KEY, 'test-api-key')
-  placesApiKeySent = null
-  placesRspStatus = 200
-  placesRspPlaces = [CENTRAL_PARK]
-  placesRejectBias = false
-  placesReqs = []
   submittedPostTitle = undefined
   submittedPostEntry = undefined
   upstreamReqs = []
@@ -401,21 +323,9 @@ function seedModerator(): void {
   moderators.push({username: 'username', subredditName: 'test_sub'})
 }
 
-/** Gives the subreddit a Default Area, as the pick form would leave one. */
+/** Gives the subreddit a Default Area, as a moderator's framing would leave one. */
 function seedArea(): void {
-  redisValues.set(
-    AREA_KEY,
-    JSON.stringify({
-      name: 'Springfield, IL, USA',
-      bounds: {west: -89.7343, south: 39.6907, east: -89.5807, north: 39.8607},
-    }),
-  )
-}
-
-/** A toast's words, whichever of its two shapes the response used. */
-function toastText(ui: UiResponse): string {
-  if (typeof ui.showToast === 'string') return ui.showToast
-  return ui.showToast?.text ?? ''
+  redisValues.set(AREA_KEY, JSON.stringify(SPRINGFIELD_IL))
 }
 
 /** Marks a post id as owned by a Map, which is what makes it a Map Post. */
@@ -521,6 +431,7 @@ test('get map: owner viewing their own map', async () => {
     ownerId: OWNER,
     pins: [{id: 'p1', location: {lat: 1, lng: 2}, title: 'Cafe'}],
     isOwner: true,
+    isModerator: false,
   })
 })
 
@@ -587,28 +498,6 @@ test('add pin: image data URL is uploaded and stored as the hosted URL', async (
   )
 })
 
-test('add pin: a place search pin is marked as one', async () => {
-  seedMap({ownerId: OWNER, pins: []})
-
-  const req: AddPinReq = {
-    location: {lat: 10, lng: 20},
-    title: 'Central Park',
-    fromPlaceSearch: true,
-  }
-  const rsp = await postJson(Endpoint.AddPin, req)
-  const body = (await rsp.json()) as AddPinRsp
-  assert.equal(body.pin.fromPlaceSearch, true)
-})
-
-test('add pin: a manually dropped pin is not marked as a place search pin', async () => {
-  seedMap({ownerId: OWNER, pins: []})
-
-  const req: AddPinReq = {location: {lat: 10, lng: 20}, title: 'My Spot'}
-  const rsp = await postJson(Endpoint.AddPin, req)
-  const body = (await rsp.json()) as AddPinRsp
-  assert.equal(body.pin.fromPlaceSearch, undefined)
-})
-
 test('add pin: a non-owner is forbidden', async () => {
   seedMap({ownerId: OWNER, pins: []})
   requestUserId = 't2_viewer' as T2
@@ -650,52 +539,6 @@ test('update pin: owner updates title and location, other fields untouched', asy
   assert.equal(body.pin.title, 'New Name')
   assert.deepEqual(body.pin.location, {lat: 5, lng: 6})
   assert.equal(body.pin.category, 'Food')
-})
-
-test('update pin: a place search pin cannot be moved', async () => {
-  seedMap({
-    ownerId: OWNER,
-    pins: [
-      {
-        id: 'p1',
-        location: {lat: 1, lng: 2},
-        title: 'Central Park',
-        fromPlaceSearch: true,
-      },
-    ],
-  })
-
-  const req: UpdatePinReq = {id: 'p1', location: {lat: 5, lng: 6}}
-  const rsp = await postJson(Endpoint.UpdatePin, req)
-  assert.equal(rsp.status, 400)
-  const body = (await rsp.json()) as ErrorRsp
-  assert.equal(body.error, 'a place search pin cannot be moved')
-
-  const getRsp = await fetch(`${serverURL}/${Endpoint.GetMap}`)
-  const map = (await getRsp.json()) as GetMapRsp
-  assert.deepEqual(map.pins[0]?.location, {lat: 1, lng: 2})
-})
-
-test('update pin: a place search pin still takes its other fields', async () => {
-  seedMap({
-    ownerId: OWNER,
-    pins: [
-      {
-        id: 'p1',
-        location: {lat: 1, lng: 2},
-        title: 'Central Park',
-        fromPlaceSearch: true,
-      },
-    ],
-  })
-
-  const req: UpdatePinReq = {id: 'p1', description: 'Worth the walk'}
-  const rsp = await postJson(Endpoint.UpdatePin, req)
-  assert.equal(rsp.status, 200)
-  const body = (await rsp.json()) as UpdatePinRsp
-  assert.equal(body.pin.description, 'Worth the walk')
-  assert.equal(body.pin.fromPlaceSearch, true)
-  assert.deepEqual(body.pin.location, {lat: 1, lng: 2})
 })
 
 test('update pin: an empty string clears an optional field', async () => {
@@ -814,50 +657,14 @@ test('delete pin: a non-owner is forbidden', async () => {
   assert.equal(map.pins.length, 1)
 })
 
-test('search places: returns place name and coordinates', async () => {
-  const rsp = await fetch(
-    `${serverURL}/${Endpoint.SearchPlaces}?q=Central+Park`,
-  )
-  assert.equal(rsp.status, 200)
-  assert.deepEqual<SearchPlacesRsp>(await rsp.json(), {
-    results: [
-      {name: 'Central Park', location: {lat: 40.785091, lng: -73.968285}},
-    ],
-  })
-})
-
-test('search places: empty query returns no results', async () => {
-  const rsp = await fetch(`${serverURL}/${Endpoint.SearchPlaces}`)
-  assert.equal(rsp.status, 200)
-  assert.deepEqual<SearchPlacesRsp>(await rsp.json(), {results: []})
-})
-
-test('search places: 503 when the subreddit has no API key configured', async () => {
-  redisValues.delete(PLACES_KEY)
-
-  const rsp = await fetch(
-    `${serverURL}/${Endpoint.SearchPlaces}?q=Central+Park`,
-  )
-  assert.equal(rsp.status, 503)
-})
-
 test("every form the app shows satisfies Devvit's own field rules", async () => {
   for (const endpoint of [
     Endpoint.OnMenuNewPost,
-    Endpoint.OnMenuPlacesKey,
-    Endpoint.OnMenuDefaultArea,
+    Endpoint.OnMenuNewIndexPost,
   ]) {
     const rsp = await fetch(`${serverURL}/${endpoint}`, {method: 'POST'})
     assertValidForm((await rsp.json()) as UiResponse, endpoint)
   }
-
-  // The one form no menu item shows: the pick is raised by a search that found
-  // more than one place, so it is reached here the way a moderator reaches it.
-  seedModerator()
-  placesRspPlaces = [SPRINGFIELD_IL, SPRINGFIELD_MA]
-  const req: DefaultAreaFormReq = {place: 'Springfield'}
-  const rsp = await postJson(Endpoint.OnFormDefaultArea, req)
-  assertValidForm((await rsp.json()) as UiResponse, Endpoint.OnFormDefaultArea)
 })
 
 /**
@@ -885,355 +692,28 @@ function assertValidForm(ui: UiResponse, label: string): void {
   }
 }
 
-test('places key menu action: reports that a key is stored, never the key', async () => {
-  const rsp = await fetch(`${serverURL}/${Endpoint.OnMenuPlacesKey}`, {
-    method: 'POST',
-  })
-  assert.equal(rsp.status, 200)
-
-  const ui = (await rsp.json()) as UiResponse
-  assert.equal(ui.showForm?.name, PlacesKeyFormName)
-  // The stored key is readable right here on the server, so the point of the
-  // assertion is that it went nowhere near the response.
-  assert.equal(JSON.stringify(ui).includes('test-api-key'), false)
-  assert.match(ui.showForm?.form.description ?? '', /A key is stored/)
-
-  const field = ui.showForm?.form.fields[0]
-  assert.equal(field?.type === 'string' && field.isSecret, true)
-  // Devvit rejects the whole form without this, and says so only at runtime.
-  assert.equal(field?.type === 'string' && field.scope, 'app')
-  assert.equal(
-    field && 'defaultValue' in field ? field.defaultValue : undefined,
-    undefined,
-  )
-})
-
-test('places key menu action: says so when no key is stored', async () => {
-  redisValues.delete(PLACES_KEY)
-
-  const rsp = await fetch(`${serverURL}/${Endpoint.OnMenuPlacesKey}`, {
-    method: 'POST',
-  })
-  const ui = (await rsp.json()) as UiResponse
-  assert.match(ui.showForm?.form.description ?? '', /No key is stored/)
-})
-
-test('places key form: stores a trimmed key that search then uses', async () => {
-  seedModerator()
-  redisValues.delete(PLACES_KEY)
-
-  const req: PlacesKeyFormReq = {key: '  fresh-api-key  '}
-  const rsp = await postJson(Endpoint.OnFormPlacesKey, req)
-  assert.equal(rsp.status, 200)
-  assert.equal(redisValues.get(PLACES_KEY), 'fresh-api-key')
-
-  // The key is only ever observable by the effect it has on a search.
-  const searchRsp = await fetch(
-    `${serverURL}/${Endpoint.SearchPlaces}?q=Central+Park`,
-  )
-  assert.equal(searchRsp.status, 200)
-  assert.equal(placesApiKeySent, 'fresh-api-key')
-})
-
-test('places key form: a blank key leaves the stored one alone', async () => {
-  seedModerator()
-  const req: PlacesKeyFormReq = {key: '   '}
-  const rsp = await postJson(Endpoint.OnFormPlacesKey, req)
-  assert.equal(rsp.status, 200)
-  assert.equal(redisValues.get(PLACES_KEY), 'test-api-key')
-})
-
-test('places key form: removing wins over anything typed alongside it', async () => {
-  seedModerator()
-  const req: PlacesKeyFormReq = {key: 'ignored-key', remove: true}
-  const rsp = await postJson(Endpoint.OnFormPlacesKey, req)
-  assert.equal(rsp.status, 200)
-  assert.equal(redisValues.get(PLACES_KEY), undefined)
-
-  const searchRsp = await fetch(
-    `${serverURL}/${Endpoint.SearchPlaces}?q=Central+Park`,
-  )
-  assert.equal(searchRsp.status, 503)
-})
-
-test('places key form: a key Google rejects is not stored', async () => {
-  seedModerator()
-  placesRspStatus = 403
-
-  const req: PlacesKeyFormReq = {key: 'bad-api-key'}
-  const rsp = await postJson(Endpoint.OnFormPlacesKey, req)
-  assert.equal(rsp.status, 200)
-
-  const ui = (await rsp.json()) as UiResponse
-  assert.match(
-    typeof ui.showToast === 'object' ? (ui.showToast.text ?? '') : '',
-    /rejected/,
-  )
-  // The key that was already working is still the one stored.
-  assert.equal(redisValues.get(PLACES_KEY), 'test-api-key')
-})
-
-test("places key form: a spent quota is not the key's fault, so it stores", async () => {
-  seedModerator()
-  placesRspStatus = 429
-
-  const req: PlacesKeyFormReq = {key: 'rate-limited-key'}
-  const rsp = await postJson(Endpoint.OnFormPlacesKey, req)
-  assert.equal(rsp.status, 200)
-  assert.equal(redisValues.get(PLACES_KEY), 'rate-limited-key')
-})
-
-test('places key form: stores an unverifiable key without claiming it works', async () => {
-  seedModerator()
-  placesRspStatus = 0
-
-  const req: PlacesKeyFormReq = {key: 'unchecked-key'}
-  const rsp = await postJson(Endpoint.OnFormPlacesKey, req)
-  assert.equal(rsp.status, 200)
-  assert.equal(redisValues.get(PLACES_KEY), 'unchecked-key')
-
-  const ui = (await rsp.json()) as UiResponse
-  const toast = typeof ui.showToast === 'object' ? ui.showToast : undefined
-  assert.match(toast?.text ?? '', /could not be reached/)
-  // Not a success: the moderator is told the check did not happen.
-  assert.equal(toast?.appearance, undefined)
-})
-
-test('places key form: removing a key asks Google nothing', async () => {
-  seedModerator()
-  placesRspStatus = 403
-
-  const req: PlacesKeyFormReq = {remove: true}
-  const rsp = await postJson(Endpoint.OnFormPlacesKey, req)
-  assert.equal(rsp.status, 200)
-  assert.equal(redisValues.get(PLACES_KEY), undefined)
-  assert.equal(placesApiKeySent, null)
-})
-
-test('places key form: a reader who does not moderate is forbidden', async () => {
-  // `devvit.json` hides the menu item that raises this form from a
-  // non-moderator, but that is a menu, not a guard — this route must refuse
-  // the submission itself.
-  const req: PlacesKeyFormReq = {key: 'stolen-key'}
-  const rsp = await postJson(Endpoint.OnFormPlacesKey, req)
-  assert.equal(rsp.status, 403)
-  assert.equal(redisValues.get(PLACES_KEY), 'test-api-key')
-})
-
-test('default area menu action: offers to name a place when none is stored', async () => {
-  const rsp = await fetch(`${serverURL}/${Endpoint.OnMenuDefaultArea}`, {
-    method: 'POST',
-  })
-  assert.equal(rsp.status, 200)
-
-  const ui = (await rsp.json()) as UiResponse
-  assert.equal(ui.showForm?.name, DefaultAreaFormName)
-  assert.match(ui.showForm?.form.description ?? '', /whole world/)
-})
-
-test('default area menu action: reports the area that is stored', async () => {
-  seedArea()
-
-  const rsp = await fetch(`${serverURL}/${Endpoint.OnMenuDefaultArea}`, {
-    method: 'POST',
-  })
-  const ui = (await rsp.json()) as UiResponse
-  // The area is not a secret the way the API key is: everyone can see where
-  // the maps open, so the moderator is told which place it is.
-  assert.match(ui.showForm?.form.description ?? '', /Springfield, IL, USA/)
-})
-
-test('default area menu action: says which setting comes first without a key', async () => {
-  redisValues.delete(PLACES_KEY)
-
-  const rsp = await fetch(`${serverURL}/${Endpoint.OnMenuDefaultArea}`, {
-    method: 'POST',
-  })
-  const ui = (await rsp.json()) as UiResponse
-  assert.equal(ui.showForm, undefined)
-  assert.match(toastText(ui), /Places API key/)
-})
-
-test('default area form: a single match is stored without a second form', async () => {
-  seedModerator()
-  const req: DefaultAreaFormReq = {place: 'Central Park'}
-  const rsp = await postJson(Endpoint.OnFormDefaultArea, req)
-  assert.equal(rsp.status, 200)
-
-  const ui = (await rsp.json()) as UiResponse
-  assert.equal(ui.showForm, undefined, 'one match is not a choice')
-  assert.match(toastText(ui), /Central Park — New York, NY, USA/)
-  assert.deepEqual(JSON.parse(redisValues.get(AREA_KEY) ?? 'null'), {
-    name: 'Central Park — New York, NY, USA',
-    bounds: {west: -73.9819, south: 40.764, east: -73.9498, north: 40.8003},
-  })
-  // Google's own rectangle for the place, asked for at the same Pro tier the
-  // name and location already cost.
-  assert.match(placesReqs[0]?.fieldMask ?? '', /places\.viewport/)
-})
-
-test('default area form: several matches are offered as a pick', async () => {
-  seedModerator()
-  placesRspPlaces = [SPRINGFIELD_IL, SPRINGFIELD_MA]
-
-  const req: DefaultAreaFormReq = {place: 'Springfield'}
-  const rsp = await postJson(Endpoint.OnFormDefaultArea, req)
-  const ui = (await rsp.json()) as UiResponse
-
-  assert.equal(ui.showForm?.name, DefaultAreaPickFormName)
-  const field = ui.showForm?.form.fields[0]
-  assert.equal(field?.type, 'select')
-  assert.deepEqual(
-    field?.type === 'select' ? field.options.map(option => option.label) : [],
-    ['Springfield, IL, USA', 'Springfield, MA, USA'],
-  )
-  // Picking is the moderator's; nothing is stored on a guess.
-  assert.equal(redisValues.get(AREA_KEY), undefined)
-})
-
-test('default area pick form: stores the rectangle that was picked', async () => {
-  seedModerator()
-  const req: DefaultAreaPickFormReq = {
-    area: [
-      JSON.stringify({
-        name: 'Springfield, MA, USA',
-        bounds: {
-          west: -72.6204,
-          south: 42.0501,
-          east: -72.4636,
-          north: 42.1585,
-        },
-      }),
-    ],
-  }
-  const rsp = await postJson(Endpoint.OnFormDefaultAreaPick, req)
-  assert.equal(rsp.status, 200)
-
-  const ui = (await rsp.json()) as UiResponse
-  assert.match(toastText(ui), /Springfield, MA, USA/)
-  assert.deepEqual(JSON.parse(redisValues.get(AREA_KEY) ?? 'null'), {
-    name: 'Springfield, MA, USA',
-    bounds: {west: -72.6204, south: 42.0501, east: -72.4636, north: 42.1585},
-  })
-})
-
-test('default area pick form: an answer that is not an area changes nothing', async () => {
-  seedModerator()
-  seedArea()
-
-  // The pick made a round trip through a client, so it is parsed rather than
-  // trusted — and a rectangle that is upside down is not a rectangle.
-  const req: DefaultAreaPickFormReq = {
-    area: [
-      JSON.stringify({
-        name: 'Nowhere',
-        bounds: {west: 0, south: 40, east: 1, north: 30},
-      }),
-    ],
-  }
-  const rsp = await postJson(Endpoint.OnFormDefaultAreaPick, req)
-  const ui = (await rsp.json()) as UiResponse
-  assert.match(toastText(ui), /No change/)
-  assert.match(redisValues.get(AREA_KEY) ?? '', /Springfield, IL, USA/)
-})
-
-test('default area form: a place Google does not know changes nothing', async () => {
-  seedModerator()
-  seedArea()
-  placesRspPlaces = []
-
-  const req: DefaultAreaFormReq = {place: 'Atlantis'}
-  const rsp = await postJson(Endpoint.OnFormDefaultArea, req)
-  const ui = (await rsp.json()) as UiResponse
-  assert.equal(ui.showForm, undefined)
-  assert.match(toastText(ui), /No place found/)
-  assert.match(redisValues.get(AREA_KEY) ?? '', /Springfield, IL, USA/)
-})
-
-test('default area form: a place with no viewport is not an area', async () => {
-  seedModerator()
-  // Google answers, but with nothing to frame. Squaring a rectangle off around
-  // the point would be this app guessing a zoom level; see ADR-0012.
-  placesRspPlaces = [{displayName: {text: 'Somewhere'}}]
-
-  const req: DefaultAreaFormReq = {place: 'Somewhere'}
-  const rsp = await postJson(Endpoint.OnFormDefaultArea, req)
-  const ui = (await rsp.json()) as UiResponse
-  assert.match(toastText(ui), /No place found/)
-  assert.equal(redisValues.get(AREA_KEY), undefined)
-})
-
-test('default area form: a blank place leaves the stored area alone', async () => {
-  seedModerator()
-  seedArea()
-
-  const req: DefaultAreaFormReq = {place: '  '}
-  const rsp = await postJson(Endpoint.OnFormDefaultArea, req)
-  const ui = (await rsp.json()) as UiResponse
-  assert.match(toastText(ui), /No change/)
-  assert.match(redisValues.get(AREA_KEY) ?? '', /Springfield, IL, USA/)
-  assert.equal(placesReqs.length, 0, 'nothing to search for, so nothing asked')
-})
-
-test('default area form: removing wins over anything typed alongside it', async () => {
-  seedModerator()
-  seedArea()
-
-  const req: DefaultAreaFormReq = {place: 'Tokyo', remove: true}
-  const rsp = await postJson(Endpoint.OnFormDefaultArea, req)
-  const ui = (await rsp.json()) as UiResponse
-  assert.match(toastText(ui), /removed/)
-  assert.equal(redisValues.get(AREA_KEY), undefined)
-  assert.equal(placesReqs.length, 0)
-})
-
-test('default area form: an unreachable Google changes nothing', async () => {
-  seedModerator()
-  seedArea()
-  placesRspStatus = 0
-
-  const req: DefaultAreaFormReq = {place: 'Tokyo'}
-  const rsp = await postJson(Endpoint.OnFormDefaultArea, req)
-  assert.equal(rsp.status, 200)
-
-  const ui = (await rsp.json()) as UiResponse
-  assert.match(toastText(ui), /could not be reached/)
-  assert.match(redisValues.get(AREA_KEY) ?? '', /Springfield, IL, USA/)
-})
-
-test('default area form: a reader who does not moderate is forbidden', async () => {
-  const req: DefaultAreaFormReq = {place: 'Tokyo'}
-  const rsp = await postJson(Endpoint.OnFormDefaultArea, req)
-  assert.equal(rsp.status, 403)
-  assert.equal(placesReqs.length, 0)
-})
-
-test('default area pick form: a reader who does not moderate is forbidden', async () => {
-  const req: DefaultAreaPickFormReq = {
-    area: [
-      JSON.stringify({
-        name: 'Tokyo',
-        bounds: {west: 0, south: 0, east: 1, north: 1},
-      }),
-    ],
-  }
-  const rsp = await postJson(Endpoint.OnFormDefaultAreaPick, req)
-  assert.equal(rsp.status, 403)
-  assert.equal(redisValues.get(AREA_KEY), undefined)
-})
-
 test('get map: the default area rides along with every map', async () => {
   seedArea()
   seedMap({ownerId: OWNER, pins: []})
 
   const rsp = await fetch(`${serverURL}/${Endpoint.GetMap}`)
   const map = (await rsp.json()) as GetMapRsp
-  assert.deepEqual(map.defaultArea?.bounds, {
-    west: -89.7343,
-    south: 39.6907,
-    east: -89.5807,
-    north: 39.8607,
-  })
+  assert.deepEqual(map.defaultArea, SPRINGFIELD_IL)
+})
+
+test('get map: an area stored by the version that asked Google is unreadable', async () => {
+  // What the Place Search era wrote: Google's viewport, under a name it chose.
+  // Those coordinates are not this app's to keep, so the shape no longer
+  // parses and the subreddit has no Default Area until one is framed.
+  redisValues.set(
+    AREA_KEY,
+    JSON.stringify({name: 'Springfield, IL, USA', bounds: SPRINGFIELD_IL}),
+  )
+  seedMap({ownerId: OWNER, pins: []})
+
+  const rsp = await fetch(`${serverURL}/${Endpoint.GetMap}`)
+  const map = (await rsp.json()) as GetMapRsp
+  assert.equal(map.defaultArea, undefined)
 })
 
 test('get map: no default area where no moderator has set one', async () => {
@@ -1254,43 +734,118 @@ test('get map: a stored area this version cannot read is no area at all', async 
   assert.equal(map.defaultArea, undefined)
 })
 
-test('search places: results are biased towards the default area', async () => {
-  seedArea()
+test('get map: the full reading is told the reader moderates here', async () => {
+  seedModerator()
+  seedMap({ownerId: OWNER, pins: []})
 
-  const rsp = await fetch(
-    `${serverURL}/${Endpoint.SearchPlaces}?q=Central+Park`,
-  )
-  assert.equal(rsp.status, 200)
-  assert.deepEqual(placesReqs[0]?.body.locationBias, {
-    // Google's corners: `low` is the south-west and `high` the north-east.
-    rectangle: {
-      low: {latitude: 39.6907, longitude: -89.7343},
-      high: {latitude: 39.8607, longitude: -89.5807},
-    },
-  })
+  const rsp = await fetch(`${serverURL}/${Endpoint.GetMap}?full=1`)
+  const map = (await rsp.json()) as GetMapRsp
+  assert.equal(map.isModerator, true)
 })
 
-test('search places: no default area, no bias', async () => {
-  await fetch(`${serverURL}/${Endpoint.SearchPlaces}?q=Central+Park`)
-  assert.equal(placesReqs[0]?.body.locationBias, undefined)
+test('get map: a preview does not ask, so it is never told', async () => {
+  seedModerator()
+  seedMap({ownerId: OWNER, pins: []})
+
+  // The same moderator, on the reading with no toolbar to put the control in.
+  // Reddit is not asked at all — an answer per feed scroll for a control that
+  // cannot be shown.
+  const rsp = await fetch(`${serverURL}/${Endpoint.GetMap}`)
+  const map = (await rsp.json()) as GetMapRsp
+  assert.equal(map.isModerator, false)
 })
 
-test('search places: a bias Google refuses does not take the search with it', async () => {
-  seedArea()
-  placesRejectBias = true
+test('get map: moderating is not owning', async () => {
+  seedModerator()
+  seedMap({ownerId: OWNER, pins: []})
+  requestUserId = 't2_viewer' as T2
 
-  const rsp = await fetch(
-    `${serverURL}/${Endpoint.SearchPlaces}?q=Central+Park`,
-  )
+  const rsp = await fetch(`${serverURL}/${Endpoint.GetMap}?full=1`)
+  const map = (await rsp.json()) as GetMapRsp
+  assert.equal(map.isModerator, true)
+  assert.equal(map.isOwner, false)
+})
+
+test('set default area: a moderator stores the rectangle they framed', async () => {
+  seedModerator()
+
+  const req: SetDefaultAreaReq = {bounds: SPRINGFIELD_IL}
+  const rsp = await postJson(Endpoint.SetDefaultArea, req)
   assert.equal(rsp.status, 200)
-  assert.deepEqual<SearchPlacesRsp>(await rsp.json(), {
-    results: [
-      {name: 'Central Park', location: {lat: 40.785091, lng: -73.968285}},
-    ],
-  })
-  // The same search again, minus the part Google would not take.
-  assert.equal(placesReqs.length, 2)
-  assert.equal(placesReqs[1]?.body.locationBias, undefined)
+  assert.deepEqual(
+    JSON.parse(redisValues.get(AREA_KEY) ?? 'null'),
+    SPRINGFIELD_IL,
+  )
+})
+
+test('set default area: an area crossing the antimeridian keeps its corners', async () => {
+  seedModerator()
+
+  // West numerically east of east is how both this app and MapLibre spell an
+  // area over the 180th meridian; it must survive the round trip unswapped.
+  const fiji = {west: 176.9, south: -19.2, east: -178.5, north: -16.1}
+  const req: SetDefaultAreaReq = {bounds: fiji}
+  assert.equal((await postJson(Endpoint.SetDefaultArea, req)).status, 200)
+
+  seedMap({ownerId: OWNER, pins: []})
+  const rsp = await fetch(`${serverURL}/${Endpoint.GetMap}`)
+  assert.deepEqual(((await rsp.json()) as GetMapRsp).defaultArea, fiji)
+})
+
+test('set default area: a rectangle that is upside down is not one', async () => {
+  seedModerator()
+
+  const req = {bounds: {west: 0, south: 40, east: 1, north: 30}}
+  const rsp = await postJson(Endpoint.SetDefaultArea, req)
+  assert.equal(rsp.status, 400)
+  assert.equal(redisValues.get(AREA_KEY), undefined)
+})
+
+test('set default area: a reader who does not moderate is forbidden', async () => {
+  // Unlike the form this replaced, an `/api/` route is reachable by any page —
+  // so this check is the whole of what stops a Viewer moving every map on the
+  // subreddit.
+  seedArea()
+  const req: SetDefaultAreaReq = {
+    bounds: {west: 0, south: 0, east: 1, north: 1},
+  }
+  const rsp = await postJson(Endpoint.SetDefaultArea, req)
+  assert.equal(rsp.status, 403)
+  assert.deepEqual(
+    JSON.parse(redisValues.get(AREA_KEY) ?? 'null'),
+    SPRINGFIELD_IL,
+  )
+})
+
+test('clear default area: a moderator puts empty maps back on the world', async () => {
+  seedModerator()
+  seedArea()
+
+  const rsp = await postJson(Endpoint.ClearDefaultArea, {})
+  assert.equal(rsp.status, 200)
+  assert.equal(redisValues.get(AREA_KEY), undefined)
+})
+
+test('clear default area: it also takes an area this version cannot read', async () => {
+  seedModerator()
+  redisValues.set(
+    AREA_KEY,
+    JSON.stringify({name: 'Springfield, IL, USA', bounds: SPRINGFIELD_IL}),
+  )
+
+  // Clearing is a delete, not a read-modify-write, so it reaches a value that
+  // no longer parses — which is the only way one leaves Redis.
+  const rsp = await postJson(Endpoint.ClearDefaultArea, {})
+  assert.equal(rsp.status, 200)
+  assert.equal(redisValues.get(AREA_KEY), undefined)
+})
+
+test('clear default area: a reader who does not moderate is forbidden', async () => {
+  seedArea()
+
+  const rsp = await postJson(Endpoint.ClearDefaultArea, {})
+  assert.equal(rsp.status, 403)
+  assert.match(redisValues.get(AREA_KEY) ?? '', /39.6907/)
 })
 
 test('new post menu action: shows a title form and creates nothing yet', async () => {

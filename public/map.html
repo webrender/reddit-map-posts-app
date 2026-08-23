@@ -63,17 +63,23 @@
       padding: 0.5rem;
       background: var(--bg);
       border-bottom: 1px solid var(--border);
+      /* Above the Map, which is full of positioned elements of MapLibre's own:
+         the tooltips below hang past the toolbar's own edge and would
+         otherwise be drawn under the tiles. */
+      position: relative;
+      z-index: 7;
     }
     body.preview #toolbar {
       display: none;
     }
-    /* The three faces of the toolbar: the controls, the add-a-pin row, and the
-       category filter — each of the latter two taking the controls' place while
-       it is open. Only ever one of them is in the flow, and none of them wraps,
-       so the toolbar keeps its one-row height whichever is showing. The Sidebar
-       toggle lives outside all three, so it survives whichever face is up. */
+    /* The three faces of the toolbar: the controls, the default-map-area row,
+       and the category filter — each of the latter two taking the controls'
+       place while it is open. Only ever one of them is in the flow, and none of
+       them wraps, so the toolbar keeps its one-row height whichever is showing.
+       The Sidebar toggle lives outside all three, so it survives whichever face
+       is up. */
     #toolbar-main,
-    #toolbar-pin,
+    #toolbar-area,
     #toolbar-filter {
       display: flex;
       align-items: center;
@@ -119,15 +125,6 @@
       width: 1.25rem;
       height: 1.25rem;
     }
-    /* Takes the slack the two buttons beside it leave, and — min-width: 0,
-       against the flex default of auto — gives its own back when there isn't
-       any, so the row still fits a narrow phone on one line. */
-    #search-wrap {
-      position: relative;
-      flex: 1 1 auto;
-      min-width: 0;
-    }
-    #search-input,
     #category-filter {
       width: 100%;
       min-height: var(--control-height);
@@ -139,76 +136,22 @@
       font: inherit;
       font-size: 0.8125rem;
     }
-    /* A notch smaller than the rest of the toolbar's type: the field shares its
-       row with a labelled button, and this is what keeps a place name readable
-       in what is left. */
-    #search-input {
-      padding: 0 0.75rem;
-      font-size: 0.75rem;
-    }
-    #search-input::placeholder {
-      color: var(--text-muted);
-    }
-    #search-input:focus,
     #category-filter:focus {
       border-color: var(--border-strong);
       outline: none;
-    }
-    /* Hangs from the field's left edge and grows past its right one, as far as
-       the viewport allows: the field gave up its width to the row it now shares,
-       and a place name still needs a line to itself. */
-    #search-results {
-      position: absolute;
-      z-index: 10;
-      top: calc(100% + 0.25rem);
-      left: 0;
-      min-width: 100%;
-      width: max-content;
-      max-width: calc(100dvw - 1rem);
-      margin: 0;
-      padding: 0.25rem;
-      list-style: none;
-      background: var(--bg);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-md);
-      box-shadow: var(--shadow);
-      max-height: 12rem;
-      overflow-y: auto;
-    }
-    #search-results:empty {
-      display: none;
-    }
-    #search-results li {
-      padding: 0.5rem 0.625rem;
-      border-radius: var(--radius-sm);
-      font-size: 0.8125rem;
-      cursor: pointer;
-    }
-    #search-results li:hover {
-      background: var(--bg-hover);
-    }
-    /* "Searching…", "Search failed." and the like ride in the results list
-       rather than in the toolbar row, which has no width to spare: they are
-       what the reader is looking at the dropdown for. */
-    #search-results li.search-hint {
-      color: var(--text-muted);
-      cursor: default;
-    }
-    #search-results li.search-hint:hover {
-      background: none;
     }
     /* Said explicitly because the `display` above outranks the user agent's
        `[hidden]` rule, and hiding two of the three faces is the whole
        mechanism. */
     #toolbar-main[hidden],
-    #toolbar-pin[hidden],
+    #toolbar-area[hidden],
     #toolbar-filter[hidden] {
       display: none;
     }
     /* Open, the filter is the whole toolbar: the select takes every pixel the
        close button leaves, so long category names are readable on a phone. The
-       width is overridden because the rule it shares with the search field sets
-       100%, which here is a whole row on its own with the button wrapped below. */
+       width is overridden because the rule above sets 100%, which here is a
+       whole row on its own with the button wrapped below. */
     #category-filter {
       flex: 1 1 auto;
       width: auto;
@@ -218,46 +161,120 @@
        toolbar. All of them carry an icon rather than a label so that a narrow
        device still fits the whole row on one line. */
     #add-pin-btn,
+    #area-btn,
     #delete-post-btn,
     #filter-btn,
-    #pin-close,
+    #area-close,
     #filter-close {
       flex: 0 0 auto;
       width: var(--control-height);
       padding: 0;
     }
     #add-pin-btn svg,
+    #area-btn svg,
     #delete-post-btn svg,
     #filter-btn svg,
-    #pin-close svg,
+    #area-close svg,
     #filter-close svg {
       width: 1.25rem;
       height: 1.25rem;
     }
-    /* The one labelled control in the toolbar: it names the add-path that has
-       no field of its own to explain it. Its text sets its width, so it never
-       gives any up to the search field beside it. */
-    #manual-pin-btn {
+    /* Every control in this row is an icon, so on a pointer device each one
+       says what it is underneath itself. The text is read off the accessible
+       name rather than written a second time, which also picks up the Sidebar
+       toggle rewriting its own as the Pin count changes. Withheld from touch,
+       where there is no hover to end and the label would be left standing over
+       the Map. */
+    @media (hover: hover) and (pointer: fine) {
+      #toolbar button[aria-label] {
+        position: relative;
+      }
+      #toolbar button[aria-label]::after {
+        content: attr(aria-label);
+        position: absolute;
+        /* Hung from the end of the row, which is the edge all of these buttons
+           but one sit against, so a long label grows inwards over the Map
+           rather than off the side of the Post. */
+        top: calc(100% + 0.5rem);
+        right: 0;
+        z-index: 8;
+        padding: 0.25rem 0.5rem;
+        border-radius: var(--radius-sm);
+        /* Inverted, the only surface in the app that is: a label about a
+           control, not another control. */
+        background: var(--text);
+        color: var(--bg);
+        box-shadow: var(--shadow);
+        font-size: 0.6875rem;
+        font-weight: 500;
+        white-space: nowrap;
+        /* Advisory only, like the status line: whatever is underneath keeps
+           the pointer. */
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 0.12s ease;
+      }
+      /* Delayed on the way in, so crossing the toolbar to reach one button
+         doesn't light up the ones passed over, and immediate on the way out. */
+      #toolbar button[aria-label]:hover::after,
+      #toolbar button[aria-label]:focus-visible::after {
+        opacity: 1;
+        transition-delay: 0.35s;
+      }
+      /* The toggle holds the other end of the row, so its own label hangs from
+         the edge it is nearest instead. */
+      #toolbar #sidebar-toggle::after {
+        right: auto;
+        left: 0;
+      }
+    }
+    /* The default-map-area face is two labelled buttons and a close: the
+       instruction that would otherwise label them is said over the Map, where
+       the framing the moderator is being asked for actually happens. The first
+       takes the slack so the pair reads as an action and its undo. */
+    #area-save-btn {
+      flex: 1 1 auto;
+      min-width: 0;
+      white-space: nowrap;
+      border-color: var(--accent);
+      background: var(--accent);
+      color: var(--on-accent);
+    }
+    #area-save-btn:hover {
+      border-color: var(--accent-hover);
+      background: var(--accent-hover);
+    }
+    #area-clear-btn {
       flex: 0 0 auto;
       padding: 0 0.75rem;
       white-space: nowrap;
     }
-    /* Accented while it is doing something: dropping a pin, or — since the
-       filter's own control is hidden behind the icon — holding a filter that is
-       narrowing what the Map and the Sidebar show. */
-    #manual-pin-btn[aria-pressed='true'],
+    /* Accented while it is doing something: waiting for the click that drops a
+       Pin, or — since the filter's own control is hidden behind the icon —
+       holding a filter that is narrowing what the Map and the Sidebar show. */
+    #add-pin-btn[aria-pressed='true'],
     #filter-btn.filtering {
       border-color: var(--accent);
       background: var(--accent);
       color: var(--on-accent);
     }
-    #manual-pin-btn[aria-pressed='true']:hover,
+    #add-pin-btn[aria-pressed='true']:hover,
     #filter-btn.filtering:hover {
       border-color: var(--accent-hover);
       background: var(--accent-hover);
     }
-    /* Both add-paths live behind this one button, so hiding it is all it takes
-       to leave a Viewer with a read-only toolbar. */
+    /* The one control on this row that is a moderator's rather than any
+       member's, and the only one that changes what everybody sees before they
+       have touched anything — so it carries the accent on its edge at rest,
+       where the others take a colour only while they are doing something. It
+       leads the row for the same reason: it is a different kind of act from
+       the ones that follow it. */
+    #area-btn {
+      border-color: var(--accent);
+    }
+
+    /* Adding a Pin is this one button, so hiding it is all it takes to leave a
+       Viewer with a read-only toolbar. */
     .viewer-mode #add-pin-btn {
       display: none;
     }
@@ -605,7 +622,41 @@
           </svg>
         </button>
         <div id="toolbar-main">
-          <button id="add-pin-btn" type="button" aria-label="Add a pin">
+          <button
+            id="area-btn"
+            type="button"
+            hidden
+            aria-label="[Mod] Set the default map area"
+          >
+            <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+              <!-- A target: the control centres the Map on what the moderator
+                   is looking at, and the ring reads as a centre rather than as
+                   the corner brackets it wore before, which every platform
+                   already spends on full screen. -->
+              <circle
+                cx="10"
+                cy="10"
+                r="5.25"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.75"
+              />
+              <path
+                d="M10 2.25v2.5M10 15.25v2.5M2.25 10h2.5M15.25 10h2.5"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.75"
+                stroke-linecap="round"
+              />
+              <circle cx="10" cy="10" r="1.5" fill="currentColor" />
+            </svg>
+          </button>
+          <button
+            id="add-pin-btn"
+            type="button"
+            aria-pressed="false"
+            aria-label="Add a pin"
+          >
             <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
               <path
                 d="M10 17.5c3.667-4.2 5.5-7.35 5.5-9.45a5.5 5.5 0 1 0-11 0c0 2.1 1.833 5.25 5.5 9.45Z"
@@ -657,20 +708,14 @@
             </svg>
           </button>
         </div>
-        <div id="toolbar-pin" hidden>
-          <div id="search-wrap">
-            <input
-              id="search-input"
-              type="text"
-              placeholder="Search places…"
-              autocomplete="off"
-            >
-            <ul id="search-results"></ul>
-          </div>
-          <button id="manual-pin-btn" type="button" aria-pressed="false">
-            Drop a Pin
-          </button>
-          <button id="pin-close" type="button" aria-label="Close add a pin">
+        <div id="toolbar-area" hidden>
+          <button id="area-save-btn" type="button">Use this view</button>
+          <button id="area-clear-btn" type="button" hidden>Clear</button>
+          <button
+            id="area-close"
+            type="button"
+            aria-label="Close default map area"
+          >
             <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
               <path
                 d="M5 5l10 10M15 5L5 15"

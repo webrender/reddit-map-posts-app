@@ -1,5 +1,7 @@
 # The Places API key is written through a form into Redis, never read back
 
+> **Superseded by ADR-0013.** The key it protects is no longer stored, asked for, or needed. Kept for the write-only-through-a-form pattern, which is the answer if this app ever holds a secret again.
+
 Reddit's app review asked us to "consider using Devvit Secrets or a one-way Devvit Redis form" for the Google Places API key. Secrets is the wrong half of that suggestion here: `isSecret` exists only on `GlobalStringSetting` in the config schema, so taking it means moving to a single app-wide key, and ADR-0002 chose per-subreddit scoping precisely so that Places cost and quota follow the subreddit generating the traffic. The one-way form keeps both properties at once, which is why this supersedes ADR-0002 rather than reversing it.
 
 A moderator-only subreddit menu item, `Set Places API key`, opens a form whose key field is a `string` with `isSecret: true`. Form fields carry that flag even though subreddit *settings* do not — that asymmetry is the entire reason this works. The submitted value goes to `/internal/on/form/places-key`, which writes it to Redis under `places-api-key`. Devvit's default `redis` client is `INSTALLATION`-scoped, so that one unqualified key is already per-subreddit; it needs no post id and must not have one, since it belongs to the install rather than to any Map.

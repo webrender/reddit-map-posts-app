@@ -10,24 +10,20 @@ import type {
 import {
   type AddPinReq,
   type AddPinRsp,
+  type ClearDefaultAreaRsp,
   type CreateMapPostReq,
   type CreateMapPostRsp,
-  DefaultAreaFormName,
-  type DefaultAreaFormReq,
-  DefaultAreaPickFormName,
-  type DefaultAreaPickFormReq,
   type DeleteIndexPostRsp,
   type DeletePinReq,
   type DeletePinRsp,
   type DeletePostRsp,
-  defaultAreaForm,
-  defaultAreaPickForm,
   defaultIndexPostTitle,
   defaultMapPostTitle,
   Endpoint,
   EndpointMethod,
   type ErrorRsp,
   type GetIndexRsp,
+  GetMapFullParam,
   type GetMapRsp,
   type IndexEntry,
   IndexPageSize,
@@ -37,17 +33,16 @@ import {
   indexPostForm,
   isIndexSort,
   isLatLng,
+  isMapBounds,
   type LatLng,
-  type MapArea,
+  type MapBounds,
   NewPostFormName,
   type NewPostFormReq,
   newPostForm,
   type Pin,
-  PlacesKeyFormName,
-  type PlacesKeyFormReq,
   PostTitleMaxLen,
-  parseMapArea,
-  type SearchPlacesRsp,
+  type SetDefaultAreaReq,
+  type SetDefaultAreaRsp,
   type UpdatePinReq,
   type UpdatePinRsp,
 } from '../shared/api.ts'
@@ -58,18 +53,15 @@ import {
   dbDeleteDefaultArea,
   dbDeleteMap,
   dbDeletePin,
-  dbDeletePlacesApiKey,
   dbGetDefaultArea,
   dbGetIndex,
   dbGetIndexMisses,
   dbGetMap,
-  dbGetPlacesApiKey,
   dbGetScoreCursor,
   dbIsMap,
   dbRecordIndexMiss,
   dbSetCachedScores,
   dbSetDefaultArea,
-  dbSetPlacesApiKey,
   dbSetScoreCursor,
   dbUnlistMap,
   dbUpdatePin,
@@ -77,7 +69,6 @@ import {
   type MapData,
 } from './db.ts'
 import {HttpError} from './http-error.ts'
-import {checkPlacesApiKey, searchAreas, searchPlaces} from './places.ts'
 import {proxyGet} from './proxy.ts'
 
 /**
@@ -115,7 +106,8 @@ type AnyRsp =
   | DeletePinRsp
   | DeletePostRsp
   | DeleteIndexPostRsp
-  | SearchPlacesRsp
+  | SetDefaultAreaRsp
+  | ClearDefaultAreaRsp
   | UiResponse
   | TriggerResponse
   | ErrorRsp
@@ -165,7 +157,7 @@ async function route(
   } else {
     switch (endpoint) {
       case Endpoint.GetMap:
-        rsp = await routeGetMap()
+        rsp = await routeGetMap(url.searchParams)
         break
       case Endpoint.AddPin:
         rsp = await routeAddPin(reqMsg)
@@ -176,8 +168,11 @@ async function route(
       case Endpoint.DeletePin:
         rsp = await routeDeletePin(reqMsg)
         break
-      case Endpoint.SearchPlaces:
-        rsp = await routeSearchPlaces(url.searchParams)
+      case Endpoint.SetDefaultArea:
+        rsp = await routeSetDefaultArea(reqMsg)
+        break
+      case Endpoint.ClearDefaultArea:
+        rsp = await routeClearDefaultArea()
         break
       case Endpoint.GetIndex:
         rsp = await routeGetIndex(url.searchParams)
@@ -203,21 +198,6 @@ async function route(
       case Endpoint.OnFormNewIndexPost:
         rsp = await routeFormNewIndexPost(reqMsg)
         break
-      case Endpoint.OnMenuPlacesKey:
-        rsp = await routeMenuPlacesKey()
-        break
-      case Endpoint.OnFormPlacesKey:
-        rsp = await routeFormPlacesKey(reqMsg)
-        break
-      case Endpoint.OnMenuDefaultArea:
-        rsp = await routeMenuDefaultArea()
-        break
-      case Endpoint.OnFormDefaultArea:
-        rsp = await routeFormDefaultArea(reqMsg)
-        break
-      case Endpoint.OnFormDefaultAreaPick:
-        rsp = await routeFormDefaultAreaPick(reqMsg)
-        break
       case Endpoint.OnTaskRefreshScores:
         rsp = await routeRefreshScores()
         break
@@ -230,21 +210,28 @@ async function route(
   writeJson<PartialJsonValue>('status' in rsp ? rsp.status : 200, rsp, rspMsg)
 }
 
-async function routeGetMap(): Promise<GetMapRsp> {
+async function routeGetMap(searchParams: URLSearchParams): Promise<GetMapRsp> {
   const t3 = requirePostId()
-  // Read for every Map, not only the empty ones: a Map that loses its last Pin
-  // while the page is open needs somewhere to go, and the Default Area is one
-  // Redis read against the one this route already makes — independent of it,
-  // so the two run together rather than one after the other.
-  const [map, defaultArea] = await Promise.all([
+  // The Default Area is read for every Map, not only the empty ones: a Map that
+  // loses its last Pin while the page is open needs somewhere to go, and it is
+  // one Redis read against the one this route already makes — independent of
+  // it, so the two run together rather than one after the other.
+  //
+  // Whether the reader moderates here is a round trip to Reddit rather than to
+  // Redis, and only the full screen reading has anywhere to put the control it
+  // decides; a Preview renders once per scroll past the post and never asks.
+  const full = searchParams.get(GetMapFullParam) === '1'
+  const [map, defaultArea, moderator] = await Promise.all([
     dbGetMap(t3),
     dbGetDefaultArea(),
+    full ? isModerator() : false,
   ])
   if (!map) throw new HttpError(404, 'map not found')
   const rsp: GetMapRsp = {
     ownerId: map.ownerId,
     pins: map.pins,
     isOwner: map.ownerId === context.userId,
+    isModerator: moderator,
   }
   if (defaultArea) rsp.defaultArea = defaultArea
   return rsp
@@ -260,7 +247,6 @@ async function routeAddPin(reqMsg: IncomingMessage): Promise<AddPinRsp> {
     location: normalizeLocation(req.location),
     title: normalizeTitle(req.title),
   }
-  if (req.fromPlaceSearch) pin.fromPlaceSearch = true
   if (req.category) pin.category = req.category
   if (req.description) pin.description = req.description
   if (req.link) pin.link = normalizeLink(req.link)
@@ -275,19 +261,12 @@ async function routeAddPin(reqMsg: IncomingMessage): Promise<AddPinRsp> {
 
 async function routeUpdatePin(reqMsg: IncomingMessage): Promise<UpdatePinRsp> {
   const t3 = requirePostId()
-  const map = await requireOwnedMap(t3)
+  await requireOwnedMap(t3)
   const req = await readJson<UpdatePinReq>(reqMsg)
 
   const patch: Partial<Pin> = {}
-  if (req.location !== undefined) {
-    // A Place Search Pin sits where the place is; only Manual Pin Drop Pins
-    // have a Location the Owner chose and may choose again.
-    const existing = map.pins.find(pin => pin.id === req.id)
-    if (existing?.fromPlaceSearch) {
-      throw new HttpError(400, 'a place search pin cannot be moved')
-    }
+  if (req.location !== undefined)
     patch.location = normalizeLocation(req.location)
-  }
   if (req.title !== undefined) patch.title = normalizeTitle(req.title)
   if (req.category !== undefined) patch.category = req.category || undefined
   if (req.description !== undefined)
@@ -314,22 +293,34 @@ async function routeDeletePin(reqMsg: IncomingMessage): Promise<DeletePinRsp> {
   return {ok: true}
 }
 
-async function routeSearchPlaces(
-  searchParams: URLSearchParams,
-): Promise<SearchPlacesRsp> {
-  const query = searchParams.get('q')?.trim()
-  if (!query) return {results: []}
+/**
+ * Stores the rectangle a moderator framed on a real Map as the subreddit's
+ * Default Area. See ADR-0014: what arrives is what MapLibre reported the view
+ * to be, so this route is the whole of the lookup that used to happen here.
+ *
+ * Unlike the form this replaced, it is reachable by any web view — `/api/`
+ * paths are what a page may fetch — so the moderator check is the only thing
+ * standing between a Viewer and where every Map on the subreddit opens.
+ */
+async function routeSetDefaultArea(
+  reqMsg: IncomingMessage,
+): Promise<SetDefaultAreaRsp> {
+  if (!(await isModerator())) throw new HttpError(403, 'not authorized')
 
-  const apiKey = await dbGetPlacesApiKey()
-  if (!apiKey) {
-    throw new HttpError(
-      503,
-      'places search is not configured for this subreddit',
-    )
-  }
+  const req = await readJson<SetDefaultAreaReq>(reqMsg)
+  await dbSetDefaultArea(normalizeBounds(req.bounds))
+  return {ok: true}
+}
 
-  const area = await dbGetDefaultArea()
-  return {results: await searchPlaces(query, apiKey, area?.bounds)}
+/**
+ * Forgets it, putting empty Maps back on the whole world. It also takes with it
+ * a rectangle stored by the version of this app that looked places up with
+ * Google — which no longer parses, so clearing is the only thing that can.
+ */
+async function routeClearDefaultArea(): Promise<ClearDefaultAreaRsp> {
+  if (!(await isModerator())) throw new HttpError(403, 'not authorized')
+  await dbDeleteDefaultArea()
+  return {ok: true}
 }
 
 /**
@@ -650,204 +641,6 @@ async function routeRefreshScores(): Promise<TriggerResponse> {
   return {}
 }
 
-/**
- * Reports whether a key is stored without reporting the key. That is the whole
- * discipline here: a moderator needs to know if place search is configured,
- * and needs no more than that to decide whether to type a new one.
- */
-async function routeMenuPlacesKey(): Promise<UiResponse> {
-  const stored = await dbGetPlacesApiKey()
-  return {
-    showForm: {
-      name: PlacesKeyFormName,
-      form: {
-        title: 'Google Places API key',
-        description: stored
-          ? 'A key is stored for this subreddit. Typing a new one replaces it.'
-          : 'No key is stored, so pins can only be added by clicking the map.',
-        acceptLabel: 'Save',
-        fields: [
-          {
-            type: 'string',
-            name: 'key',
-            label: 'API key',
-            // Never pre-filled, even though the value is known here: the
-            // stored key must not travel back to a client, and a masked
-            // field would render it as dots the moderator cannot verify.
-            isSecret: true,
-            // Devvit refuses `isSecret` without this, using one validator for
-            // form fields and settings alike. It does not make the key an app
-            // setting and cannot widen its scope: `transformForm` drops
-            // `scope` on the way to the wire, and the form field proto has no
-            // such field to carry it. The key stays in this subreddit's Redis.
-            scope: 'app',
-            helpText: 'Leave blank to keep the stored key unchanged.',
-            placeholder: 'AIza...',
-          },
-          {
-            type: 'boolean',
-            name: 'remove',
-            label: 'Remove the stored key instead',
-            defaultValue: false,
-          },
-        ],
-      },
-    },
-  }
-}
-
-async function routeFormPlacesKey(
-  reqMsg: IncomingMessage,
-): Promise<UiResponse> {
-  // The menu item that raises this form is hidden from non-moderators by
-  // `devvit.json`, but that hides a button — it authorizes nothing. Without
-  // this check, anyone could POST straight to this route and replace or
-  // delete the subreddit's Google Places API key.
-  if (!(await isModerator())) throw new HttpError(403, 'not authorized')
-
-  const req = await readJson<PlacesKeyFormReq>(reqMsg)
-  const key = req.key?.trim()
-
-  // Checked before the key, so that ticking the box does what it says even if
-  // the moderator also typed something.
-  if (req.remove) {
-    await dbDeletePlacesApiKey()
-    return {
-      showToast: {text: 'Places API key removed.', appearance: 'success'},
-    }
-  }
-  if (!key) return {showToast: {text: 'No change: no key was entered.'}}
-
-  const check = await checkPlacesApiKey(key)
-  // A key Google refuses is never stored, so a typo cannot displace the
-  // working key that is already there.
-  if (check === 'rejected') {
-    return {
-      showToast: {text: 'Google rejected that key, so it was not saved.'},
-    }
-  }
-
-  await dbSetPlacesApiKey(key)
-  // An unreachable Google is not a reason to refuse a key the moderator may
-  // well have typed correctly — but it is a reason not to claim it works.
-  return {
-    showToast:
-      check === 'ok'
-        ? {text: 'Places API key saved.', appearance: 'success'}
-        : {text: 'Key saved, but Google could not be reached to check it.'},
-  }
-}
-
-/**
- * Setting a Default Area begins with a place search, so it needs the same key
- * Place Search does. Without one there is nothing the form could look up, so
- * the moderator is told which setting comes first rather than being asked for a
- * place and refused afterwards.
- */
-async function routeMenuDefaultArea(): Promise<UiResponse> {
-  if (!(await dbGetPlacesApiKey())) {
-    return {
-      showToast: {
-        text: 'Set the Google Places API key first — the default area is looked up with it.',
-      },
-    }
-  }
-  const area = await dbGetDefaultArea()
-  return {
-    showForm: {name: DefaultAreaFormName, form: defaultAreaForm(area?.name)},
-  }
-}
-
-/**
- * The first half of setting a Default Area: turn what the moderator typed into
- * the places Google thinks they meant. Nothing is stored here unless there was
- * only one of those, because storing the first of several would be this app
- * guessing which Springfield a subreddit is about.
- */
-async function routeFormDefaultArea(
-  reqMsg: IncomingMessage,
-): Promise<UiResponse> {
-  // As with the Places API key form: `devvit.json` only hides the menu item
-  // that raises this form, so this route re-checks before changing where
-  // every new Map on the subreddit opens.
-  if (!(await isModerator())) throw new HttpError(403, 'not authorized')
-
-  const req = await readJson<DefaultAreaFormReq>(reqMsg)
-  const place = req.place?.trim()
-
-  // Checked before the place, for the reason the Places API key form checks it
-  // first: ticking the box should do what it says even alongside typing.
-  if (req.remove) {
-    await dbDeleteDefaultArea()
-    return {
-      showToast: {
-        text: 'Default map area removed. New maps open on the whole world.',
-        appearance: 'success',
-      },
-    }
-  }
-  if (!place) return {showToast: {text: 'No change: no place was entered.'}}
-
-  const apiKey = await dbGetPlacesApiKey()
-  if (!apiKey) {
-    return {
-      showToast: {text: 'No change: this subreddit has no Places API key.'},
-    }
-  }
-
-  let areas: MapArea[]
-  try {
-    areas = await searchAreas(place, apiKey)
-  } catch (err) {
-    console.error(`default area search failed; ${err}`)
-    return {
-      showToast: {text: 'Google could not be reached, so nothing was changed.'},
-    }
-  }
-
-  const [first] = areas
-  if (!first) return {showToast: {text: `No place found for “${place}”.`}}
-  // One match is not a choice, so it is not offered as one.
-  if (areas.length === 1) return await storeDefaultArea(first)
-
-  return {
-    showForm: {name: DefaultAreaPickFormName, form: defaultAreaPickForm(areas)},
-  }
-}
-
-/**
- * The second half: the moderator's pick, which arrives as the same JSON the
- * pick form put in the option. It is parsed rather than trusted — it made a
- * round trip through a client — and an unreadable answer changes nothing.
- */
-async function routeFormDefaultAreaPick(
-  reqMsg: IncomingMessage,
-): Promise<UiResponse> {
-  // The other half of the same form; see routeFormDefaultArea.
-  if (!(await isModerator())) throw new HttpError(403, 'not authorized')
-
-  const req = await readJson<DefaultAreaPickFormReq>(reqMsg)
-  const [chosen] = req.area ?? []
-  const area = chosen ? parseMapArea(chosen) : undefined
-  if (!area) return {showToast: {text: 'No change: no place was picked.'}}
-  return await storeDefaultArea(area)
-}
-
-/**
- * Where both halves end up. The toast names the place, because the moderator
- * typed a word and what got stored is a rectangle — the name is the only part
- * of it they can check.
- */
-async function storeDefaultArea(area: MapArea): Promise<UiResponse> {
-  await dbSetDefaultArea(area)
-  return {
-    showToast: {
-      text: `New maps will open on ${area.name}.`,
-      appearance: 'success',
-    },
-  }
-}
-
 async function createMapPost(title: string) {
   const ownerId = context.userId
   if (!ownerId) throw new HttpError(401, 'you must be logged in to make a map')
@@ -878,6 +671,19 @@ function normalizeLocation(location: unknown): LatLng {
   if (!isLatLng(location))
     throw new HttpError(400, 'a valid location is required')
   return location
+}
+
+/**
+ * The Default Area, refused rather than stored when it is not a rectangle. It
+ * arrives from a client that read it off a live Map, which is exactly why it is
+ * checked here: a value that does not parse on the way back out is a subreddit
+ * whose Maps quietly stopped opening where the moderator put them.
+ */
+function normalizeBounds(bounds: unknown): MapBounds {
+  if (!isMapBounds(bounds)) {
+    throw new HttpError(400, 'a valid map area is required')
+  }
+  return bounds
 }
 
 function normalizeLink(link: string): string {

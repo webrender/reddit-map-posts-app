@@ -2,19 +2,31 @@ import {AJAXError, addProtocol} from 'maplibre-gl'
 import {
   type AddPinReq,
   type AddPinRsp,
+  type ClearDefaultAreaRsp,
   type DeletePinReq,
   type DeletePinRsp,
   type DeletePostRsp,
   Endpoint,
+  GetMapFullParam,
   type GetMapRsp,
-  type PlaceResult,
+  type SetDefaultAreaReq,
+  type SetDefaultAreaRsp,
   type UpdatePinReq,
   type UpdatePinRsp,
 } from '../shared/api.ts'
 import {fetchJson} from './json.ts'
 
-export async function fetchGetMap(): Promise<GetMapRsp | undefined> {
-  return fetchJson(Endpoint.GetMap)
+/**
+ * `full` is the reading asking, and it decides whether the server spends a
+ * Reddit round trip working out if this reader moderates here. A Preview has
+ * nowhere to put the control that answer gates, so it does not ask.
+ */
+export async function fetchGetMap(
+  full: boolean,
+): Promise<GetMapRsp | undefined> {
+  return fetchJson(
+    full ? `${Endpoint.GetMap}?${GetMapFullParam}=1` : Endpoint.GetMap,
+  )
 }
 
 export async function fetchAddPin(
@@ -92,33 +104,16 @@ export function installProxyProtocol(): void {
   })
 }
 
-export type SearchPlacesResult =
-  | {ok: true; results: PlaceResult[]}
-  | {ok: false; unavailable: boolean}
+/** Makes the rectangle the moderator framed the subreddit's Default Area. */
+export async function fetchSetDefaultArea(
+  req: SetDefaultAreaReq,
+): Promise<SetDefaultAreaRsp | undefined> {
+  return fetchJson(Endpoint.SetDefaultArea, req)
+}
 
-export async function fetchSearchPlaces(
-  query: string,
-): Promise<SearchPlacesResult> {
-  let rsp: Response
-  try {
-    rsp = await fetch(
-      `${Endpoint.SearchPlaces}?q=${encodeURIComponent(query)}`,
-      {
-        headers: {Accept: 'application/json'},
-      },
-    )
-  } catch (err) {
-    console.error(`HTTP error: ${err instanceof Error ? err.message : err}`)
-    return {ok: false, unavailable: false}
-  }
-
-  if (rsp.status === 503) return {ok: false, unavailable: true}
-  if (!rsp.ok) {
-    const text = await rsp.text().catch(() => '')
-    console.error(`HTTP status ${rsp.status}: ${rsp.statusText}; ${text}`)
-    return {ok: false, unavailable: false}
-  }
-
-  const body = (await rsp.json()) as {results: PlaceResult[]}
-  return {ok: true, results: body.results}
+/** Takes no arguments: there is one Default Area, and it belongs to the install. */
+export async function fetchClearDefaultArea(): Promise<
+  ClearDefaultAreaRsp | undefined
+> {
+  return fetchJson(Endpoint.ClearDefaultArea, {})
 }

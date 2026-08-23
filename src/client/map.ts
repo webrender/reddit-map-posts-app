@@ -19,21 +19,22 @@ import {
   type AddPinReq,
   deletePostForm,
   type LatLng,
-  type MapArea,
+  type MapBounds,
   type Pin,
-  type PlaceResult,
   type UpdatePinReq,
 } from '../shared/api.ts'
 import {
   fetchAddPin,
+  fetchClearDefaultArea,
   fetchDeletePin,
   fetchDeletePost,
   fetchGetMap,
-  fetchSearchPlaces,
+  fetchSetDefaultArea,
   fetchUpdatePin,
   installProxyProtocol,
   proxyExternalUrl,
 } from './fetch.ts'
+import {parseMapLink} from './map-link.ts'
 import {
   filterPins,
   initSidebar,
@@ -46,18 +47,18 @@ import {
   setSidebarOpen,
 } from './sidebar.ts'
 
-const searchInput = document.getElementById('search-input') as HTMLInputElement
-const searchResultsList = document.getElementById(
-  'search-results',
-) as HTMLUListElement
 const mapStatus = document.getElementById('map-status') as HTMLParagraphElement
 const addPinBtn = document.getElementById('add-pin-btn') as HTMLButtonElement
-const manualPinBtn = document.getElementById(
-  'manual-pin-btn',
+const areaBtn = document.getElementById('area-btn') as HTMLButtonElement
+const areaSaveBtn = document.getElementById(
+  'area-save-btn',
 ) as HTMLButtonElement
-const pinCloseBtn = document.getElementById('pin-close') as HTMLButtonElement
+const areaClearBtn = document.getElementById(
+  'area-clear-btn',
+) as HTMLButtonElement
+const areaCloseBtn = document.getElementById('area-close') as HTMLButtonElement
 const toolbarMain = document.getElementById('toolbar-main') as HTMLDivElement
-const toolbarPin = document.getElementById('toolbar-pin') as HTMLDivElement
+const toolbarArea = document.getElementById('toolbar-area') as HTMLDivElement
 const toolbarFilter = document.getElementById(
   'toolbar-filter',
 ) as HTMLDivElement
@@ -166,6 +167,27 @@ const previewFitPadding = {top: 56, bottom: 130, left: 64, right: 64}
 /** How long a message that reports something that already happened stays up. */
 const flashStatusMs = 4000
 
+/** How close the Map gets when it goes to one Pin rather than framing them all. */
+const pinZoom = 15
+
+/**
+ * Whether a Map Link can be pasted at all, which needs a keyboard to press ⌘V
+ * on and no field to press it into. A touch device has neither, and the links
+ * its Maps apps share are the short ones {@link parseMapLink} refuses anyway —
+ * so it is never offered a gesture it cannot make. See ADR-0015.
+ */
+const canPasteMapLink = matchMedia('(hover: hover) and (pointer: fine)').matches
+
+/**
+ * What the Map is waiting for while the Pin Drop is armed, said over the Map
+ * itself since the button holding the mode is a row away from where the click
+ * has to land. It is also the only place the paste is advertised, and is
+ * restated after a link that could not be read, since the Map is still waiting.
+ */
+const dropInstruction = canPasteMapLink
+  ? 'Click the map to place the pin, or paste a Google or Apple Maps link.'
+  : 'Click the map to place the pin.'
+
 /**
  * How a Pin came to be selected. Selection itself is shared state, but each
  * origin drives a different side effect — that is what keeps a Map click from
@@ -177,10 +199,10 @@ type SelectSource = 'card' | 'marker' | 'new' | 'drag'
 /**
  * Which of the toolbar's three faces is showing. The two that aren't `main` are
  * modes: they replace the controls rather than sitting beside them, because a
- * field wide enough to be worth typing in leaves a narrow toolbar no room for
+ * control wide enough to be worth reading leaves a narrow toolbar no room for
  * the buttons.
  */
-type ToolbarFace = 'main' | 'pin' | 'filter'
+type ToolbarFace = 'main' | 'area' | 'filter'
 
 let map: MapLibreMap
 /**
@@ -191,12 +213,18 @@ let map: MapLibreMap
  */
 let isPreview = false
 let isOwner = false
+/**
+ * Whether this reader moderates the subreddit, which is the whole of what
+ * decides if the Default Area control is on screen. Never true in a Preview,
+ * which does not ask.
+ */
+let isModerator = false
 let pins: Pin[] = []
 /**
  * Where a Map with nothing to frame opens, set by a moderator for the whole
- * subreddit and absent where none has. See ADR-0012.
+ * subreddit and absent where none has. See ADR-0014.
  */
-let defaultArea: MapArea | undefined
+let defaultArea: MapBounds | undefined
 const markers = new Map<string, Marker>()
 
 let activeCategory = ''
@@ -209,8 +237,6 @@ let pendingMarker: Marker | undefined
 let droppingPin = false
 let toolbarFace: ToolbarFace = 'main'
 let statusTimeout: ReturnType<typeof setTimeout> | undefined
-let searchDebounce: ReturnType<typeof setTimeout> | undefined
-let searchToken = 0
 
 async function init(): Promise<void> {
   // MapLibre parses tiles in a Web Worker it loads from a separate file. Left to
@@ -254,8 +280,9 @@ async function init(): Promise<void> {
   // that decides it is not a window in which a Viewer can reach them.
   document.body.classList.add('viewer-mode')
   deletePostBtn.hidden = true
+  areaBtn.hidden = true
 
-  const data = await fetchGetMap()
+  const data = await fetchGetMap(!isPreview)
   // Nothing to draw and nothing wired up, so the toolbar the page painted
   // before the fetch would be a set of controls that answer to nothing. It
   // keeps the read-only face it started with, and says why it is empty.
@@ -265,11 +292,17 @@ async function init(): Promise<void> {
   }
 
   isOwner = data.isOwner
+  isModerator = data.isModerator
   pins = data.pins
   defaultArea = data.defaultArea
   document.body.classList.toggle('viewer-mode', !isOwner)
-  // The Preview has no toolbar to hold it.
+  // The Preview has no toolbar to hold either of them.
   deletePostBtn.hidden = isPreview || !isOwner
+  // Unlike every other control in the toolbar this one answers to moderating
+  // the subreddit rather than to owning the Map, and the two have nothing to do
+  // with each other: a moderator sets where every Map opens from whichever Map
+  // Post they happen to be reading, including someone else's.
+  areaBtn.hidden = isPreview || !isModerator
 
   // A Preview is the markers and nothing else: no Pin Cards to build, no
   // toolbar to fill in, and one button that leaves for the reading that has all
@@ -367,14 +400,14 @@ function pinBounds(visible: readonly Pin[]): LngLatBounds {
 
 /**
  * The Default Area as MapLibre wants it. An area that crosses the antimeridian
- * arrives with its west edge numerically east of its east edge, which is how
- * Google spells one; MapLibre reads that as a rectangle the other way round, so
- * the east edge is carried past 180 instead — without which a Map of Fiji would
- * open on every longitude except its own.
+ * is stored with its west edge numerically east of its east edge, which is how
+ * {@link viewBounds} spells one; MapLibre reads that as a rectangle the other
+ * way round, so the east edge is carried past 180 instead — without which a Map
+ * of Fiji would open on every longitude except its own.
  */
-function areaBounds(area: MapArea | undefined): LngLatBounds | undefined {
+function areaBounds(area: MapBounds | undefined): LngLatBounds | undefined {
   if (!area) return
-  const {west, south, east, north} = area.bounds
+  const {west, south, east, north} = area
   return new LngLatBounds(
     [west, south],
     [east < west ? east + 360 : east, north],
@@ -390,9 +423,8 @@ function renderMarkers(visible: Pin[]): void {
 function createMarker(pin: Pin): Marker {
   const selected = pin.id === selectedPinId
   // Only the Selected Pin can be moved, so an off-target tap on any other
-  // marker can never drag a Pin somewhere by accident — and a Place Search Pin
-  // never can, since its Location is the place's rather than the Owner's.
-  const draggable = selected && isOwner && !pin.fromPlaceSearch
+  // marker can never drag a Pin somewhere by accident.
+  const draggable = selected && isOwner
   const marker = new Marker({
     color: selected ? selectedMarkerColor : markerColor,
     draggable,
@@ -465,7 +497,7 @@ function selectPin(pinId: string | undefined, source: SelectSource): void {
   if (!pin) return
   switch (source) {
     case 'card':
-      map.flyTo({center: [pin.location.lng, pin.location.lat], zoom: 15})
+      map.flyTo({center: [pin.location.lng, pin.location.lat], zoom: pinZoom})
       break
     case 'marker':
     case 'new':
@@ -533,8 +565,8 @@ function renderCategoryOptions(): void {
   filterBtn.classList.toggle('filtering', !!activeCategory)
   // Nothing left to filter by: the open face would be a lone "All categories"
   // over a toolbar the reader can no longer reach. Only the filter face is
-  // dismissed — this runs after every save, and the add-a-pin face the save
-  // came from stays put for the next one.
+  // dismissed — this runs after every save, and a moderator part-way through
+  // framing a Default Area is not doing the thing that emptied it.
   if (filterBtn.hidden && toolbarFace === 'filter') setToolbarFace('main')
 }
 
@@ -547,20 +579,137 @@ function setToolbarFace(face: ToolbarFace): void {
   if (face === previous) return
   toolbarFace = face
   toolbarMain.hidden = face !== 'main'
-  toolbarPin.hidden = face !== 'pin'
+  toolbarArea.hidden = face !== 'area'
   toolbarFilter.hidden = face !== 'filter'
 
-  // Leaving the add-a-pin face disarms the drop it armed: with the button that
-  // says so gone from the toolbar, a Map still waiting to be clicked has
-  // nothing left to explain itself.
-  if (previous === 'pin') stopDroppingPin()
+  // Both modes take the Map over in their own way, and neither survives the
+  // other: an armed drop belongs to the main face's Add a Pin, and the
+  // instruction the area face wrote over the Map goes with the face.
+  if (face !== 'main') stopDroppingPin()
+  if (previous === 'area') setStatus('')
+  if (face === 'area') enterAreaFace()
 
   // Focus follows the swap, so the keyboard lands on whatever replaced the
   // control it was on rather than falling back to the top of the document.
-  if (face === 'pin') searchInput.focus()
+  if (face === 'area') areaSaveBtn.focus()
   else if (face === 'filter') categoryFilterSelect.focus()
-  else if (previous === 'pin' && !addPinBtn.hidden) addPinBtn.focus()
+  else if (previous === 'area' && !areaBtn.hidden) areaBtn.focus()
   else if (previous === 'filter' && !filterBtn.hidden) filterBtn.focus()
+}
+
+/**
+ * Takes a Map Link pasted onto an armed drop as the Location the click on the
+ * Map would have given, and the Title the Owner would have typed. The Map is
+ * moved to it first: the Pin is somewhere the Map is almost certainly not
+ * looking, and it arrives rather than flies because the dialog covering it
+ * opens in the same breath, leaving an animation to play to nobody.
+ *
+ * A link that cannot be read leaves the drop armed and says why, since the
+ * Owner is mid-gesture and clicking the Map is still open to them.
+ */
+function dropPastedLink(text: string): void {
+  const link = parseMapLink(text)
+  if (link.kind === 'shortened') {
+    flashStatus(
+      'A short map link carries no location. Open it, then paste the link it lands on.',
+      dropInstruction,
+    )
+    return
+  }
+  if (link.kind === 'unreadable') {
+    flashStatus('No location in that link.', dropInstruction)
+    return
+  }
+
+  stopDroppingPin()
+  map.jumpTo({
+    center: [link.location.lng, link.location.lat],
+    zoom: Math.max(map.getZoom(), pinZoom),
+  })
+  openNewPinDialog(link.location, link.title)
+}
+
+/**
+ * Opening the face shows what is already set rather than saying it: the Map
+ * jumps to the stored Default Area, so a moderator adjusts a framing they can
+ * see instead of a place name they have to trust. With none stored there is
+ * nowhere to jump to and the view they arrived with is the starting point.
+ *
+ * Framed without the padding {@link fitToPins} gives it, so that what fills the
+ * screen is exactly what is stored — which is what the instruction below
+ * promises, and what keeps opening the face and saving again from quietly
+ * widening the area by the padding every time. An empty Map still opens on the
+ * padded version, the same breathing room a Map full of Pins gets.
+ *
+ * It arrives rather than flies. An animated framing is a camera that is still
+ * moving while the button that reads it off is already focused, so a moderator
+ * who opens the face and takes the framing offered would store somewhere
+ * between where they were and where they were being shown.
+ */
+function enterAreaFace(): void {
+  areaClearBtn.hidden = !defaultArea
+  const bounds = areaBounds(defaultArea)
+  if (bounds) map.fitBounds(bounds, {padding: 0, duration: 0})
+  setStatus('Pan and zoom to the area new maps should open on.')
+}
+
+/**
+ * What the Map is looking at, as the rectangle the Default Area is stored as.
+ *
+ * MapLibre reports a view that has been panned across the antimeridian in
+ * longitudes that have run past ±180 — 182° rather than -178° — and it reports
+ * a whole-world view as a range wider than 360°. Neither is a rectangle this
+ * app can store, so each is spelled the way {@link areaBounds} reads one back:
+ * a range that covers everything becomes the whole world outright, and anything
+ * narrower is wrapped, which is what leaves a Map of Fiji with a west edge
+ * numerically east of its east edge.
+ */
+function viewBounds(): MapBounds {
+  const bounds = map.getBounds()
+  const south = Math.max(bounds.getSouth(), -90)
+  const north = Math.min(bounds.getNorth(), 90)
+  const west = bounds.getWest()
+  const east = bounds.getEast()
+  if (east - west >= 360) return {west: -180, south, east: 180, north}
+  return {west: wrapLng(west), south, east: wrapLng(east), north}
+}
+
+/** A longitude brought back into [-180, 180). 180° itself becomes -180°. */
+function wrapLng(lng: number): number {
+  return ((((lng + 180) % 360) + 360) % 360) - 180
+}
+
+/** Makes the framing on screen the area every empty Map on the subreddit opens on. */
+async function saveDefaultArea(): Promise<void> {
+  const bounds = viewBounds()
+  areaSaveBtn.disabled = true
+  const rsp = await fetchSetDefaultArea({bounds})
+  areaSaveBtn.disabled = false
+  if (!rsp) {
+    flashStatus('Could not save the default map area.')
+    return
+  }
+  defaultArea = bounds
+  setToolbarFace('main')
+  flashStatus('New maps with no pins will open on this view.')
+}
+
+/**
+ * Puts empty Maps back on the whole world. It asks nothing first, unlike Delete
+ * Map: framing the Map again is all it takes to undo, so a modal here would be
+ * a deliberate step in front of a reversible one.
+ */
+async function clearDefaultArea(): Promise<void> {
+  areaClearBtn.disabled = true
+  const rsp = await fetchClearDefaultArea()
+  areaClearBtn.disabled = false
+  if (!rsp) {
+    flashStatus('Could not clear the default map area.')
+    return
+  }
+  defaultArea = undefined
+  setToolbarFace('main')
+  flashStatus('New maps with no pins will open on the whole world.')
 }
 
 /** Puts a message over the Map until something replaces or clears it. */
@@ -572,12 +721,15 @@ function setStatus(text: string): void {
 
 /**
  * Reports something that has already finished happening, which nothing later
- * will clear — so it clears itself.
+ * will clear — so it clears itself. Where the Map was in the middle of saying
+ * something standing, `thenShow` is what it goes back to saying; a mode that
+ * ends before the timer does clears it through {@link setStatus}, so the
+ * standing message cannot outlive the mode it belongs to.
  */
-function flashStatus(text: string): void {
+function flashStatus(text: string, thenShow: string = ''): void {
   setStatus(text)
   statusTimeout = setTimeout(() => {
-    mapStatus.textContent = ''
+    mapStatus.textContent = thenShow
     statusTimeout = undefined
   }, flashStatusMs)
 }
@@ -601,7 +753,7 @@ function openEditDialog(pin: Pin): void {
   pinDialog.showModal()
 }
 
-function openNewPinDialog(location: LatLng): void {
+function openNewPinDialog(location: LatLng, title?: string): void {
   editingPinId = undefined
   editingLocation = location
   pendingImageDataUrl = undefined
@@ -609,6 +761,11 @@ function openNewPinDialog(location: LatLng): void {
 
   pinDialogTitle.textContent = 'New Pin'
   pinForm.reset()
+  // A Map Link arrives already knowing what the place is called; a click on the
+  // Map does not. Either way the Title is the Owner's, and this one is offered
+  // in the field they were going to type it in rather than saved behind their
+  // back.
+  if (title) pinTitleInput.value = title
   pinImagePreview.hidden = true
   pinRemoveImageBtn.hidden = true
   pinDeleteBtn.hidden = true
@@ -700,6 +857,26 @@ async function deleteEditingPin(): Promise<void> {
   closePinDialog()
 }
 
+/**
+ * Arms the Pin Drop: the next click on the Map is a Location rather than a
+ * selection, and — where there is a keyboard for it — a Map Link pasted with
+ * nothing focused is the same answer given a different way.
+ */
+function startDroppingPin(): void {
+  droppingPin = true
+  addPinBtn.setAttribute('aria-pressed', 'true')
+  document.getElementById('map')?.style.setProperty('cursor', 'crosshair')
+  setStatus(dropInstruction)
+}
+
+function stopDroppingPin(): void {
+  if (!droppingPin) return
+  droppingPin = false
+  addPinBtn.setAttribute('aria-pressed', 'false')
+  document.getElementById('map')?.style.removeProperty('cursor')
+  setStatus('')
+}
+
 function readImageAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -707,95 +884,6 @@ function readImageAsDataUrl(file: File): Promise<string> {
     reader.onerror = () => reject(reader.error)
     reader.readAsDataURL(file)
   })
-}
-
-/**
- * Arms the Manual Pin Drop: the next click on the Map is a Location rather than
- * a selection. What the Map is waiting for is said over the Map itself, since
- * the button holding the mode is a row away from where the click has to land.
- */
-function startDroppingPin(): void {
-  droppingPin = true
-  manualPinBtn.setAttribute('aria-pressed', 'true')
-  document.getElementById('map')?.style.setProperty('cursor', 'crosshair')
-  setStatus('Click the map to place the pin.')
-}
-
-function stopDroppingPin(): void {
-  if (!droppingPin) return
-  droppingPin = false
-  manualPinBtn.setAttribute('aria-pressed', 'false')
-  document.getElementById('map')?.style.removeProperty('cursor')
-  setStatus('')
-}
-
-function clearSearchResults(): void {
-  searchResultsList.innerHTML = ''
-}
-
-/**
- * Says what the search is doing where its results would be. The dropdown is the
- * one place with room for a sentence, and it is where the reader is already
- * looking once they have typed.
- */
-function renderSearchHint(text: string): void {
-  searchResultsList.innerHTML = ''
-  const item = document.createElement('li')
-  item.className = 'search-hint'
-  item.textContent = text
-  searchResultsList.appendChild(item)
-}
-
-function renderSearchResults(results: PlaceResult[]): void {
-  if (!results.length) {
-    renderSearchHint('No places found.')
-    return
-  }
-  searchResultsList.innerHTML = ''
-  for (const result of results) {
-    const item = document.createElement('li')
-    item.textContent = result.name
-    item.addEventListener('click', () => void selectSearchResult(result))
-    searchResultsList.appendChild(item)
-  }
-}
-
-async function runSearch(query: string): Promise<void> {
-  const token = ++searchToken
-  renderSearchHint('Searching…')
-  const result = await fetchSearchPlaces(query)
-  if (token !== searchToken) return // superseded by a newer search or a cleared input
-
-  if (!result.ok) {
-    renderSearchHint(
-      result.unavailable
-        ? 'Ask a moderator to set up place search for this subreddit.'
-        : 'Search failed.',
-    )
-    return
-  }
-  renderSearchResults(result.results)
-}
-
-async function selectSearchResult(result: PlaceResult): Promise<void> {
-  searchToken++ // invalidate any in-flight search
-  clearSearchResults()
-  searchInput.value = ''
-  const rsp = await fetchAddPin({
-    location: result.location,
-    title: result.name,
-    fromPlaceSearch: true,
-  })
-  if (!rsp) {
-    flashStatus('Could not add pin.')
-    return
-  }
-  pins.push(rsp.pin)
-  renderCategoryOptions()
-  render()
-  map.easeTo({center: [result.location.lng, result.location.lat], duration: 0})
-  selectPin(rsp.pin.id, 'new')
-  openEditDialog(rsp.pin)
 }
 
 /**
@@ -879,39 +967,46 @@ function wireEvents(): void {
     render()
   })
 
+  // Moderating the subreddit and owning the Map are unrelated, so this is wired
+  // above the Owner check rather than inside it: a moderator reading someone
+  // else's Map still sets where every Map opens.
+  areaBtn.addEventListener('click', () => setToolbarFace('area'))
+  areaCloseBtn.addEventListener('click', () => setToolbarFace('main'))
+  areaSaveBtn.addEventListener('click', () => void saveDefaultArea())
+  areaClearBtn.addEventListener('click', () => void clearDefaultArea())
+  toolbarArea.addEventListener('keydown', ev => {
+    if (ev.key === 'Escape') setToolbarFace('main')
+  })
+
   if (!isOwner) return
 
-  // The button opens the face holding both add-paths; dropping a Pin is one of
-  // the two things offered there, rather than what the button itself does.
-  addPinBtn.addEventListener('click', () => setToolbarFace('pin'))
-  pinCloseBtn.addEventListener('click', () => setToolbarFace('main'))
-  toolbarPin.addEventListener('keydown', ev => {
-    if (ev.key !== 'Escape') return
-    // Armed, Escape disarms and leaves the face open: the reader is a click
-    // away from the Map, not done with adding a Pin.
+  // Adding a Pin is one gesture now that there is one add-path: the button arms
+  // the drop rather than opening a face to choose from.
+  addPinBtn.addEventListener('click', () => {
     if (droppingPin) stopDroppingPin()
-    else setToolbarFace('main')
+    else startDroppingPin()
   })
   // An armed drop is waiting on the Map, so it has to be cancellable from
-  // there too — by then the keyboard is nowhere near the toolbar.
+  // there — by then the keyboard is nowhere near the toolbar.
   document.addEventListener('keydown', ev => {
     if (ev.key === 'Escape' && droppingPin) stopDroppingPin()
   })
 
-  manualPinBtn.addEventListener('click', () => {
-    if (droppingPin) stopDroppingPin()
-    else startDroppingPin()
-  })
-
-  searchInput.addEventListener('input', () => {
-    if (searchDebounce) clearTimeout(searchDebounce)
-    const query = searchInput.value.trim()
-    if (!query) {
-      searchToken++ // invalidate any in-flight search
-      clearSearchResults()
-      return
-    }
-    searchDebounce = setTimeout(() => void runSearch(query), 300)
+  // The other way to answer an armed drop, and the reason it needs no field of
+  // its own: the reader has just clicked Add a Pin and is holding the pointer
+  // over the Map with nothing focused, so ⌘V lands on the document. Read the
+  // moment it arrives rather than behind a Confirm, which could only ever say
+  // yes. See ADR-0015.
+  document.addEventListener('paste', ev => {
+    if (!droppingPin) return
+    const pasted = ev.clipboardData?.getData('text')
+    if (!pasted?.trim()) return
+    // The armed drop has taken this paste, so the browser must not also carry
+    // out its own: placing a Pin focuses the New Pin dialog's Title field, and
+    // the default action would then insert the whole URL into it, behind the
+    // name this just put there.
+    ev.preventDefault()
+    dropPastedLink(pasted)
   })
 
   pinImageInput.addEventListener('change', () => {

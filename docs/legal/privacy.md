@@ -1,6 +1,6 @@
 # Privacy Policy — Map Posts
 
-**Effective date:** 10 August 2026
+**Effective date:** 22 August 2026
 **Applies to:** the Map Posts app (`map-posts`) for the Reddit Developer Platform
 
 Map Posts is a Reddit app that lets a subreddit member create a post containing an interactive map and add pins to it. This policy describes exactly what the app stores, what it sends to third parties, and what it does not do. It covers the app only — Reddit's own collection of your data is governed by the [Reddit Privacy Policy](https://www.reddit.com/policies/privacy-policy).
@@ -24,7 +24,8 @@ That is the complete set. There is no separate user profile, no account, and no 
 ## What the app does not do
 
 - **No cookies or device storage.** The app sets no cookies and writes nothing to `localStorage`, `sessionStorage`, or any other browser storage.
-- **No device location.** The app never calls the browser's geolocation API. Pins are placed by searching for a place by name or by clicking a spot on the map — never by reading where you are.
+- **No device location.** The app never calls the browser's geolocation API. Pins are placed by clicking a spot on the map, or by pasting a maps link you copied yourself — never by reading where you are.
+- **No clipboard access.** The app cannot read your clipboard; it can only see a link at the moment you paste one, while you are adding a pin. That link is picked apart in your browser to find the coordinates and place name already written in it. It is not sent anywhere, and nothing is stored except the pin you then choose to save.
 - **No analytics or tracking.** There is no analytics SDK, no telemetry, no pixels, and no advertising.
 - **No selling or sharing for marketing.** Your data is not sold, rented, or shared with anyone for advertising purposes.
 - **No contact details.** The app does not collect email addresses, phone numbers, or real names.
@@ -39,17 +40,13 @@ Note also that a new map post is titled `{username}'s Map` using the creator's R
 
 ## Third-party services
 
-The app contacts two external services. Both are contacted **from the app's server**, not from your browser — so neither one receives your IP address, your user agent, or any other information about your device.
+The app contacts one external service, and it is contacted **from the app's server**, not from your browser — so it receives no IP address, user agent, or any other information about your device.
 
 **OpenFreeMap** (`tiles.openfreemap.org`) supplies the map's base imagery: the style, sprites, fonts, and vector tiles. Because the app's webview cannot reach non-Reddit hosts directly, every one of these requests is fetched by the app's server and forwarded on. OpenFreeMap therefore sees requests coming from the app's server infrastructure and cannot identify or profile individual viewers. The only information in such a request is which map tile is needed, which follows from where the map is scrolled.
 
-**Google Places API** (`places.googleapis.com`) powers place search, and is contacted only when a map owner actively types into the place-search box. The typed search text is sent to Google along with the subreddit's own API key, and the app requests only two fields back — the place's display name and its coordinates. Nothing about the Reddit user, the post, or the subreddit is sent. Google's handling of that query is governed by the [Google Privacy Policy](https://policies.google.com/privacy) and the Google Maps Platform terms. If a subreddit has not configured an API key, place search is simply unavailable and no request is ever made to Google.
-
 **Reddit** hosts the app, its storage, and its uploaded images. All app data lives on Reddit's Developer Platform infrastructure.
 
-## A note for subreddit moderators
-
-The Google Places API key is entered as a per-subreddit app setting. Because the Devvit settings schema supports masking only on app-wide settings, a subreddit-scoped key is stored and displayed as plain text in that subreddit's app settings screen, where other moderators of that subreddit can read it. This is a deliberate trade-off — it keeps API cost and quota with the subreddit generating the traffic rather than pooling every install onto one key — but treat the key accordingly: scope and restrict it in the Google Cloud Console, and rotate it if your moderator team changes. See `docs/adr/0002-subreddit-scoped-unmasked-places-api-key.md`.
+**No Google or Apple services are used.** Earlier versions of the app offered a place search backed by the Google Places API, and a subreddit could store its own API key for it. That feature has been removed: the app contacts no Google or Apple service, holds no API key, and asks nothing of anyone to search for a place. Pins are placed by clicking the map or by pasting a maps link, which is read in your own browser and never fetched, followed, or forwarded — including short share links, which the app refuses rather than follows.
 
 ## Retention and deletion
 

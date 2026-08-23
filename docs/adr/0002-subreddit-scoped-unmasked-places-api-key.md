@@ -1,5 +1,7 @@
 # Google Places API key as an unmasked subreddit setting
 
+> **Superseded by ADR-0013.** Place Search is gone and with it the Google Places API key, so there is no longer a key to scope, mask, or bill to anyone. Kept for the reasoning about Devvit's settings scopes, which still holds for any future per-subreddit secret.
+
 Each subreddit installing this app supplies its own Google Places API key, entered by that subreddit's moderator as a Devvit `subreddit`-scoped setting rather than a single app-wide `global` setting. Devvit's settings schema only supports masking (`isSecret`) on `global` settings — a per-subreddit setting has no masking option in this schema version, so the key is stored as a plain string, visible in that subreddit's install/settings UI.
 
 We accepted this over the masked alternative because subreddit-scoping keeps Places API cost and quota ownership tied to whichever subreddit is generating the traffic, rather than pooling all installs onto a single key paid for by the app developer. This was a deliberate trade of secret-masking for cost isolation, not an oversight — a future reader should not assume the plaintext storage is a bug to fix without first reconsidering whether they actually want to switch back to a shared global key.

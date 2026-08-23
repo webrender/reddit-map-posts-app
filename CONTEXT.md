@@ -48,23 +48,20 @@ _Avoid_: Splash, launch screen (Devvit's own name for a native screen that can p
 The interactive map rendered inside a Map Post, built with MapLibre GL using OpenFreeMap's Bright style. A Map holds zero or more Pins. It is always seen from directly overhead and north-up: one finger always pans, two fingers zoom, and the camera does nothing else — outside a Preview, where it does nothing at all.
 
 **Pin**:
-A single marked location on a Map. Requires a Location and a Title; Category, description, link, and an uploaded image are all optional. A Pin remembers which of the two add-paths it came from, and that is the only thing the paths leave behind: a Place Search Pin's Location is the place's own and can't be moved afterwards, while a Manual Pin Drop Pin's Location was chosen by the Owner and can be re-chosen by dragging. Everything else about the two is the same.
+A single marked location on a Map. Requires a Location and a Title; Category, description, link, and an uploaded image are all optional. Its Location can be re-chosen by dragging its marker, whichever way it was first given: the Owner clicked the Map or pasted a Map Link carrying it, and the Title beside it is theirs to write either way, so a moved Pin can never end up disagreeing with a name it did not choose.
 _Avoid_: Marker, point
 
-**Place Search**:
-The primary way an Owner adds a Pin: an autocomplete search backed by the Google Places API. Only the place's name and lat/lng coordinates are fetched from Google — everything else on the resulting Pin is entered manually — to keep API usage minimal. It works only where a moderator has stored that subreddit's own API key (see ADR-0009); without one, Manual Pin Drop is the only add-path.
-_Avoid_: Geocoding (this app never fetches full place details, just autocomplete name + coordinates)
+**Pin Drop**:
+The one way to add a Pin: the Owner arms it from the toolbar and then says where. Clicking the spot on the Map is how that is answered everywhere; on a device with a keyboard it can also be answered by pasting a Map Link, with nothing focused and no field to paste into. They are two answers to one question rather than two add-paths, which is why arming is still a single decision, the toolbar grows nothing, and a Viewer's toolbar is still made read-only by hiding a single control. See ADR-0013 and ADR-0015.
+_Avoid_: Place Search, Manual Pin Drop (both name a distinction that no longer exists — there is nothing for "manual" to be the opposite of); geocoding, place lookup (this app resolves no names to coordinates at all)
 
-**Manual Pin Drop**:
-The secondary way to add a Pin: the Owner clicks directly on the Map to place a Pin at that location, then types its Title by hand (no name is auto-filled). Both add-paths are reached the same way — one control on the toolbar replaces it with a row holding the Place Search field beside the button that arms the drop — so adding a Pin is one decision (which path) rather than two unrelated controls, and a Viewer's toolbar loses both by losing one.
-
-**Places API Key**:
-The Google Places API key that makes Place Search work, one per subreddit, supplied by a moderator through a masked form and stored where only the server can reach it. It travels in one direction: the app can tell you whether a key exists, never what it is, and replacing or removing it is the only thing a moderator can do to one. See ADR-0009.
-_Avoid_: Setting, secret (it is neither — Devvit's own settings can't mask a per-subreddit value, and its Secrets are app-wide)
+**Map Link**:
+A Google Maps or Apple Maps URL pasted onto an armed Pin Drop. The app takes it apart on the device for the coordinates and the place name already written in it, and offers both in the New Pin form — a Location to save and a Title to keep or retype, neither of them a Pin until the Owner saves one. It is read, never resolved: nothing is sent anywhere, there is nothing to send it with, and a link that keeps its location behind a redirect — every short share link either provider hands out — is refused rather than followed. That refusal is why this is a desktop convenience rather than a feature of the app everywhere: a phone's Maps app shares short links, and a phone cannot paste without a field to paste into, so a phone is never told the gesture exists. See ADR-0015.
+_Avoid_: Import, lookup, search (all suggest the app asks someone something; it asks no one anything)
 
 **Default Area**:
-The part of the world a subreddit's Maps open on when they have no Pins to frame — Europe, Hawaii, Tokyo — set by a moderator from the subreddit menu and held for the whole install, one per subreddit like the Places API Key. It is a rectangle rather than a place and a zoom: the moderator names a place, what gets stored is Google's own box around it, and each Map solves for the zoom that fits that box in the space it has, so one setting frames the same area in a Preview and full screen alike. Naming it takes two steps, a search and then a pick, because one word is usually several places and this app is not the one to choose between them. It needs a Places API Key, since looking a place up is a place search, and it repays that by biasing Place Search towards itself — near places rank first, distant ones are still findable. It is read live rather than copied into a Map Post as it is made, so correcting it corrects every empty Map at once, and where none is set a Map opens on the whole world, as every Map used to. See ADR-0012.
-_Avoid_: Home view, default zoom (both name a camera, and what is stored is a place); bounding box, viewport (the mechanism, not the setting)
+The part of the world a subreddit's Maps open on when they have no Pins to frame, held for the whole install, one per subreddit. It is a rectangle rather than a place and a zoom: each Map solves for the zoom that fits the rectangle in the space it has, so one setting frames the same area in a Preview and full screen alike. A moderator sets it by framing it — they open any Map Post full screen, pan and zoom until the Map is showing what they mean, and take that view; the rectangle stored is what was on the screen. There is nothing to name and nothing to search, which is why there is no menu item for it and no way for the app to disagree with the moderator about which Springfield they meant. It is read live rather than copied into a Map Post as it is made, so correcting it corrects every empty Map at once, and where none is set a Map opens on the whole world, as every Map used to. See ADR-0014.
+_Avoid_: Home view, default zoom (both name a camera, and what is stored is an area); bounding box, viewport (the mechanism, not the setting)
 
 **Category**:
 A label an Owner assigns to a Pin, drawn from that Map's own accumulating set of categories rather than a fixed predefined list — typing a new name creates it, typing an existing one reuses it. A Pin has exactly one Category (never zero-to-many), which is what makes sorting and filtering a Map by Category well-defined. The set of categories isn't a separately managed entity — it's just the distinct Category values currently in use across the Map's Pins.
@@ -78,7 +75,7 @@ One Pin's entry in the Sidebar, showing that Pin's full details. Pin Cards are g
 _Avoid_: Row, list item, entry
 
 **Selected Pin**:
-The single Pin the Map and the Sidebar are both currently focused on, or none. Selection is shared state, so the two views can never disagree about it, but what selecting does — zooming the Map, scrolling the Sidebar, both, or neither — depends on how the Pin came to be selected. Selecting the Selected Pin again lets go of it, and with nothing selected the Map frames every Pin it is showing, which is also how it loads — or the subreddit's Default Area, when there is no Pin to frame. Only the Selected Pin's marker can be dragged, and only by the Owner, and only if it came from a Manual Pin Drop.
+The single Pin the Map and the Sidebar are both currently focused on, or none. Selection is shared state, so the two views can never disagree about it, but what selecting does — zooming the Map, scrolling the Sidebar, both, or neither — depends on how the Pin came to be selected. Selecting the Selected Pin again lets go of it, and with nothing selected the Map frames every Pin it is showing, which is also how it loads — or the subreddit's Default Area, when there is no Pin to frame. Only the Selected Pin's marker can be dragged, and only by the Owner.
 
 **Owner**:
 The Reddit user who created a Map Post. Only the Owner can add, edit, or delete Pins on that Map Post's Map, and only the Owner can Delete Map.
@@ -86,3 +83,7 @@ _Avoid_: Creator, author (informal synonyms; Owner is canonical because it denot
 
 **Viewer**:
 Any Reddit user viewing a Map Post who is not its Owner. Viewers can see all Pins but cannot modify them. Every reader of an Index Post is a Viewer of it; nothing on one is owned.
+
+**Moderator**:
+A moderator of the subreddit the app is installed in, which is a different axis from Owner and Viewer rather than a rank above them: moderating grants nothing over anyone's Map. It decides exactly two things — who may create an Index Post and Delete Index Post, and who may set the Default Area. That last one is the only control in a Map Post's toolbar that answers to moderating rather than to owning, and a moderator uses it on whichever Map Post they happen to be reading, including a Viewer's view of someone else's. Reddit is asked whether one particular reader moderates rather than for the mod list, and a Reddit that cannot be reached answers no.
+_Avoid_: Admin (Reddit's own word for its staff, not a subreddit's moderators)

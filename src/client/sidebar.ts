@@ -105,12 +105,15 @@ export function initSidebar(sidebarHandlers: SidebarHandlers): void {
 /**
  * The toggle is an icon, so what it does and how many Pins are behind it are
  * only ever said in its accessible name — which has to be refreshed both when
- * the Sidebar opens and when the list it counts changes.
+ * the Sidebar opens and when the list it counts changes. The tooltip the
+ * toolbar shows on hover is drawn from that same attribute, so this is the one
+ * place the label is written.
  */
 function labelToggle(): void {
-  const label = `${open ? 'Hide' : 'Show'} pins (${pinCount})`
-  toggleEl.setAttribute('aria-label', label)
-  toggleEl.title = label
+  toggleEl.setAttribute(
+    'aria-label',
+    `${open ? 'Hide' : 'Show'} pins (${pinCount})`,
+  )
 }
 
 /** Below this the Sidebar overlays the Map instead of taking a column of it. */
