@@ -641,10 +641,34 @@ async function routeRefreshScores(): Promise<TriggerResponse> {
   return {}
 }
 
+/**
+ * Makes the Map Post, from whichever of the two places asked for one. It is
+ * submitted as the Owner rather than as the app account, which is what puts
+ * their name on the byline Reddit shows a scrolling reader: without `runAs`
+ * every Map in every feed was posted by u/map-posts, and the one person who
+ * could not be found from a Map Post was the person who made it.
+ *
+ * `runAs: 'USER'` costs three things. It needs `permissions.reddit.asUser` to
+ * name `SUBMIT_POST` in `devvit.json`, or the call throws before it reaches
+ * Reddit. It needs `userGeneratedContent`, which is what a safety report is
+ * actioned against, and the title is the whole of what the Owner has written
+ * at this point — the Map is empty until they drop a Pin on it. And it is only
+ * true in production: an unapproved or playtest app runs the submit from the
+ * app account anyway, attributed to the app owner, so this reads as working on
+ * the dev subreddit whether or not it is.
+ *
+ * The Owner is still recorded in Redis, and every Owner check still reads it
+ * from there. Reddit's authorship and this app's ownership agree now, but they
+ * are not the same fact, and only one of them decides who may move a Pin.
+ */
 async function createMapPost(title: string) {
   const ownerId = context.userId
   if (!ownerId) throw new HttpError(401, 'you must be logged in to make a map')
-  const post = await reddit.submitCustomPost({title})
+  const post = await reddit.submitCustomPost({
+    title,
+    runAs: 'USER',
+    userGeneratedContent: {text: title},
+  })
   await dbCreateMap(post.id as T3, ownerId, {
     title,
     author: context.username ?? '',

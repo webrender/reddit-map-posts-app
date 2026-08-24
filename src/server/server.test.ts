@@ -67,6 +67,10 @@ let requestUserId: T2 = OWNER
 let submittedPostTitle: string | undefined
 /** Which `post.entrypoints` key the last submitted post asked to render. */
 let submittedPostEntry: string | undefined
+/** Which account the last submitted post was submitted as. */
+let submittedPostRunAs: string | undefined
+/** What the last submitted post offered a safety report to act against. */
+let submittedPostUgc: {text: string} | undefined
 /** Every external URL the server fetched, with the headers it forwarded. */
 let upstreamReqs: {url: string; headers: Headers}[] = []
 
@@ -198,6 +202,8 @@ before(async () => {
   ) => {
     submittedPostTitle = opts.title
     submittedPostEntry = opts.entry
+    submittedPostRunAs = opts.runAs
+    submittedPostUgc = opts.userGeneratedContent
     return {
       id: POST,
       url: `https://reddit.com/r/test_sub/comments/${POST}`,
@@ -304,6 +310,8 @@ beforeEach(() => {
   requestUserId = OWNER
   submittedPostTitle = undefined
   submittedPostEntry = undefined
+  submittedPostRunAs = undefined
+  submittedPostUgc = undefined
   upstreamReqs = []
   moderators = []
   moderatorsUnreadable = false
@@ -1432,6 +1440,11 @@ test('create map post: indexes the new map, which stays unlisted until it has a 
   assert.equal(submittedPostTitle, 'Coffee shops of Berlin')
   // A Map Post takes the default entrypoint; only an Index Post names one.
   assert.equal(submittedPostEntry, undefined)
+  // Submitted by the Owner, so Reddit's byline names them rather than the app
+  // account, and carrying the one thing they have written for a report to act
+  // against.
+  assert.equal(submittedPostRunAs, 'USER')
+  assert.deepEqual(submittedPostUgc, {text: 'Coffee shops of Berlin'})
   assert.deepEqual<CreateMapPostRsp>(await rsp.json(), {
     url: `https://reddit.com/r/test_sub/comments/${POST}`,
   })
@@ -1492,6 +1505,10 @@ test('index post form: creates a post on the index entrypoint and indexes nothin
   assert.equal(rsp.status, 200)
   assert.equal(submittedPostTitle, 'r/test_sub Community Maps')
   assert.equal(submittedPostEntry, 'index')
+  // An Index Post is owned by no one, so it stays the app account's post: the
+  // moderator who asked for one is not its author the way an Owner is theirs.
+  assert.equal(submittedPostRunAs, undefined)
+  assert.equal(submittedPostUgc, undefined)
 
   const ui = (await rsp.json()) as UiResponse
   assert.equal(ui.navigateTo, `https://reddit.com/r/test_sub/comments/${POST}`)

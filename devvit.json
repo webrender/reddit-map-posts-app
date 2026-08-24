@@ -20,6 +20,9 @@
   "permissions": {
     "http": {
       "domains": ["tiles.openfreemap.org"]
+    },
+    "reddit": {
+      "asUser": ["SUBMIT_POST"]
     }
   },
   "menu": {

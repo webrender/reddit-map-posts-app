@@ -78,7 +78,7 @@ _Avoid_: Row, list item, entry
 The single Pin the Map and the Sidebar are both currently focused on, or none. Selection is shared state, so the two views can never disagree about it, but what selecting does — zooming the Map, scrolling the Sidebar, both, or neither — depends on how the Pin came to be selected. Selecting the Selected Pin again lets go of it, and with nothing selected the Map frames every Pin it is showing, which is also how it loads — or the subreddit's Default Area, when there is no Pin to frame. Only the Selected Pin's marker can be dragged, and only by the Owner.
 
 **Owner**:
-The Reddit user who created a Map Post. Only the Owner can add, edit, or delete Pins on that Map Post's Map, and only the Owner can Delete Map.
+The Reddit user who created a Map Post. Only the Owner can add, edit, or delete Pins on that Map Post's Map, and only the Owner can Delete Map. The Map Post is submitted under their name rather than the app account's, so the byline Reddit shows a scrolling reader names them too — but Reddit's authorship and this app's ownership are two facts that agree rather than one, and only the one stored in Redis decides who may move a Pin. An Index Post has no Owner and is nobody's post: it stays the app account's. See ADR-0016.
 _Avoid_: Creator, author (informal synonyms; Owner is canonical because it denotes edit rights, not just authorship)
 
 **Viewer**:
