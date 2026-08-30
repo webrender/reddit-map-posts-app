@@ -274,8 +274,11 @@
     }
 
     /* Adding a Pin is this one button, so hiding it is all it takes to leave a
-       Viewer with a read-only toolbar. */
-    .viewer-mode #add-pin-btn {
+                       Viewer with a read-only toolbar. Import and Export hide the same way, for
+                       the same reason: both are the Owner's, and neither is a second gesture to
+                       take away. */
+    .viewer-mode #add-pin-btn,
+    .viewer-mode #pins-io-btn {
       display: none;
     }
     /* The only irreversible thing in the app, so it is the only control that
@@ -337,6 +340,16 @@
        the toolbar. It sits over the Map instead of in the toolbar because the
        toolbar row is full, and because two of its three faces are hidden at any
        moment while a message can arrive under any of them. */
+    /* Scoped to :not([hidden]) for the same reason #pin-image-preview is: an id
+                       selector setting `display` outranks the user agent's
+                       `[hidden] {display: none}`. The pill is hidden from script rather than by
+                       `:empty`, because it is no longer empty when it has nothing to say — the
+                       help button is a child of it. */
+    #map-status:not([hidden]) {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
     #map-status {
       grid-area: map;
       align-self: end;
@@ -351,11 +364,25 @@
       box-shadow: var(--shadow);
       font-size: 0.75rem;
       color: var(--text);
-      /* Advisory only: the Map underneath keeps every click and drag. */
+      /* Advisory only: the Map underneath keeps every click and drag. The help
+                         button takes its own clicks back below. */
       pointer-events: none;
     }
-    #map-status:empty {
-      display: none;
+    #map-status-text {
+      margin: 0;
+    }
+    /* Round, the size of the line it sits on, and the one part of the status
+                       line that is not advisory — so it is the one part that takes a click. */
+    #map-status-help {
+      flex: 0 0 auto;
+      width: 1.25rem;
+      height: 1.25rem;
+      min-height: 0;
+      padding: 0;
+      border-radius: 50%;
+      font-size: 0.75rem;
+      line-height: 1;
+      pointer-events: auto;
     }
     /* Narrow: the Sidebar overlays the Map from the left, leaving a strip of
     Map exposed to tap on to dismiss it. Wide (see the media query): it takes a
@@ -453,8 +480,40 @@
       font-size: 0.875rem;
       font-weight: 600;
     }
-    .pin-card-category {
+    /* Said explicitly for the same reason the `button` rule is: the
+                   `display: inline-block` above outranks the user agent's `[hidden]`. */
+    .category-swatch[hidden] {
+      display: none;
+    }
+    /* Beside the select, the swatch is the answer to "which of these pins did I
+                   just narrow to" — the filter is the one place a Category is named without
+                   a Pin Card or a heading already carrying its colour. */
+    #filter-swatch {
+      width: 0.625rem;
+      height: 0.625rem;
+      margin-left: 0.125rem;
+    }
+    /* The one thing that says which colour on the Map means which Category.
+                   A ring in the surface colour keeps it legible where the colour it shows
+                   is close to whatever it is sitting on, in either theme. */
+    .category-swatch {
       display: inline-block;
+      flex: none;
+      width: 0.5rem;
+      height: 0.5rem;
+      border-radius: 50%;
+      box-shadow: 0 0 0 1px var(--bg);
+    }
+    .pin-group-heading .category-swatch {
+      margin-right: 0.375rem;
+      vertical-align: 0.02em;
+    }
+    .pin-card-category .category-swatch {
+      margin-right: 0.3rem;
+    }
+    .pin-card-category {
+      display: inline-flex;
+      align-items: center;
       margin-top: 0.3rem;
       padding: 0.125rem 0.5rem;
       border-radius: var(--radius-pill);
@@ -503,9 +562,27 @@
     dialog::backdrop {
       background: rgb(0 0 0 / 60%);
     }
-    #pin-dialog-title {
+    #pin-dialog-title,
+    #link-help-title,
+    #pins-io-title {
       margin: 0 0 0.75rem;
       font-size: 1rem;
+    }
+    #link-help-dialog p,
+    #link-help-dialog li {
+      margin: 0 0 0.6rem;
+      font-size: 0.8125rem;
+      line-height: 1.45;
+      color: var(--text-muted);
+    }
+    #link-help-dialog ol {
+      margin: 0;
+      padding-left: 1.25rem;
+    }
+    #link-help-actions {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: 0.75rem;
     }
     #pin-form label {
       display: block;
@@ -566,6 +643,82 @@
       min-height: 1.75rem;
       padding: 0 0.75rem;
       font-size: 0.75rem;
+    }
+    /* Import and Export in one dialog, because they are one idea seen from
+                       either end: the text Export writes is the text Import reads, and putting
+                       them side by side is what makes that obvious without saying it. Wider
+                       than the other two, since both fields hold JSON that has to be legible
+                       enough to check before it is copied or pasted. */
+    #pins-io-dialog {
+      max-width: 34rem;
+    }
+    #pins-io-dialog h3 {
+      margin: 0 0 0.25rem;
+      font-size: 0.8125rem;
+    }
+    #pins-io-dialog p {
+      margin: 0 0 0.4rem;
+      font-size: 0.75rem;
+      line-height: 1.45;
+      color: var(--text-muted);
+    }
+    #pins-io-dialog textarea {
+      display: block;
+      width: 100%;
+      padding: 0.5rem 0.75rem;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      background: var(--bg-subtle);
+      color: var(--text);
+      font-family: ui-monospace, monospace;
+      font-size: 0.75rem;
+      line-height: 1.4;
+      resize: vertical;
+      /* Wraps rather than scrolling sideways: the Owner is reading this to
+                         check it, not to admire the line breaks. */
+      white-space: pre-wrap;
+    }
+    /* Export is above Import and separated by a rule, so the dialog reads as
+                       two actions rather than one form with four controls. */
+    #pins-io-import {
+      margin-top: 1rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--border);
+    }
+    #pins-io-export-actions,
+    #pins-io-import-actions {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+    }
+    #pins-io-add {
+      margin-left: auto;
+      border-color: var(--accent);
+      background: var(--accent);
+      color: var(--on-accent);
+    }
+    #pins-io-add:hover {
+      border-color: var(--accent-hover);
+      background: var(--accent-hover);
+    }
+    #pins-io-footer {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: 0.75rem;
+    }
+    /* What the dialog has to say about the last thing tried in it — a copy that
+                       the sandbox refused, a count that landed, an entry that could not be
+                       read. It takes the width the buttons leave, and says nothing at rest. */
+    #pins-io-note {
+      flex: 1 1 auto;
+      min-width: 0;
+      margin: 0;
+      font-size: 0.75rem;
+      line-height: 1.35;
+    }
+    #pins-io-note.error {
+      color: var(--danger);
     }
     /* MapLibre's own controls, brought in line with the rest. */
     .maplibregl-ctrl-group {
@@ -675,6 +828,25 @@
             </svg>
           </button>
           <button
+            id="pins-io-btn"
+            type="button"
+            hidden
+            aria-label="Import or export pins"
+          >
+            <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+              <!-- One arrow out and one back in: the two directions the same
+                   text travels, which is the whole of what this control is. -->
+              <path
+                d="M6.5 12.5v-8M6.5 4.5 4 7M6.5 4.5 9 7M13.5 7.5v8M13.5 15.5 11 13M13.5 15.5 16 13"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.75"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
+          <button
             id="filter-btn"
             type="button"
             hidden
@@ -728,6 +900,12 @@
           </button>
         </div>
         <div id="toolbar-filter" hidden>
+          <span
+            id="filter-swatch"
+            class="category-swatch"
+            aria-hidden="true"
+            hidden
+          ></span>
           <select id="category-filter" aria-label="Filter by category">
             <option value="">All categories</option>
           </select>
@@ -745,7 +923,17 @@
         </div>
       </header>
       <div id="map"></div>
-      <p id="map-status" role="status"></p>
+      <div id="map-status" hidden>
+        <p id="map-status-text" role="status"></p>
+        <button
+          id="map-status-help"
+          type="button"
+          hidden
+          aria-label="How to paste a maps link"
+        >
+          ?
+        </button>
+      </div>
       <aside id="sidebar" aria-label="Pins">
         <div id="pin-list"></div>
       </aside>
@@ -784,6 +972,72 @@
           <button id="pin-save" type="submit">Save</button>
         </div>
       </form>
+    </dialog>
+
+    <dialog id="link-help-dialog">
+      <h2 id="link-help-title">Pasting a maps link</h2>
+      <p>
+        This app can parse links from Google Maps or Apple Maps which include
+        coordinates directly in the URL &mdash; shortlinks will not work.
+      </p>
+      <ol>
+        <li>
+          In another window, open Google Maps or Apple Maps. Search for the
+          location you would like to add.
+        </li>
+        <li>
+          Copy the URL from your address bar, which should have
+          latitude/longitude coordinates directly in the URL. Do not use the
+          share function to generate a link.
+        </li>
+        <li>
+          Add a pin here and paste the URL &mdash; the app will parse the
+          coordinates and title and drop the pin automatically.
+        </li>
+      </ol>
+      <div id="link-help-actions">
+        <button id="link-help-close" type="button">Got it</button>
+      </div>
+    </dialog>
+
+    <dialog id="pins-io-dialog">
+      <h2 id="pins-io-title">Import or export pins</h2>
+      <section id="pins-io-export">
+        <h3>Export</h3>
+        <p>
+          Every pin on this map, as text. Keep a copy of it, edit it, or paste
+          it into another map you own.
+        </p>
+        <textarea
+          id="pins-io-export-text"
+          rows="6"
+          readonly
+          aria-label="This map's pins, as text"
+        ></textarea>
+        <div id="pins-io-export-actions">
+          <button id="pins-io-copy" type="button">Copy</button>
+        </div>
+      </section>
+      <section id="pins-io-import">
+        <h3>Import</h3>
+        <p>
+          Paste an export here to add its pins to this map. Pins are added
+          &mdash; nothing already on the map is changed or removed.
+        </p>
+        <textarea
+          id="pins-io-import-text"
+          rows="6"
+          placeholder="Paste an export here"
+          aria-label="Pins to add to this map"
+        ></textarea>
+        <div id="pins-io-import-actions">
+          <p id="pins-io-note" role="status"></p>
+          <button id="pins-io-add" type="button">Add pins</button>
+        </div>
+      </section>
+      <div id="pins-io-footer">
+        <button id="pins-io-close" type="button">Close</button>
+      </div>
     </dialog>
 
     <script src="map.js" type="module"></script>

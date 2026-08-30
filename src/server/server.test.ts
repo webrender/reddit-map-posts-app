@@ -23,6 +23,8 @@ import {
   type ErrorRsp,
   type GetIndexRsp,
   type GetMapRsp,
+  type ImportPinsReq,
+  type ImportPinsRsp,
   IndexPageSize,
   type IndexPostFormReq,
   NewPostFormName,
@@ -33,6 +35,7 @@ import {
   type UpdatePinReq,
   type UpdatePinRsp,
 } from '../shared/api.ts'
+import {PinImportMaxCount} from '../shared/pins-file.ts'
 import type {MapData} from './db.ts'
 import {onReq} from './server.ts'
 
@@ -318,7 +321,10 @@ beforeEach(() => {
 })
 
 /** What Reddit will say about a post id, for the reads an Index Post makes. */
-const redditPosts = new Map<T3, {score: number; removed: boolean}>()
+const redditPosts = new Map<
+  T3,
+  {score: number; removed: boolean; removedByCategory?: string}
+>()
 /** Every post the app asked Reddit to delete, in order. */
 let deletedPosts: T3[] = []
 /** Who moderates what, as Reddit would answer it. */
@@ -380,14 +386,23 @@ function seedIndexed(
   )
 }
 
-/** Teaches the Reddit mock about a post; without this, reads of it throw. */
+/**
+ * Teaches the Reddit mock about a post; without this, reads of it throw.
+ *
+ * A throw is Reddit failing to answer, which is *not* what deletion looks like:
+ * Reddit answers for a deleted post with a tombstone, which is
+ * `removedByCategory` and nothing else.
+ */
 function seedRedditPost(
   t3: T3,
-  opts?: {score?: number; removed?: boolean},
+  opts?: {score?: number; removed?: boolean; removedByCategory?: string},
 ): void {
   redditPosts.set(t3, {
     score: opts?.score ?? 0,
     removed: opts?.removed ?? false,
+    ...(opts?.removedByCategory === undefined
+      ? {}
+      : {removedByCategory: opts.removedByCategory}),
   })
 }
 
@@ -663,6 +678,201 @@ test('delete pin: a non-owner is forbidden', async () => {
   const getRsp = await fetch(`${serverURL}/${Endpoint.GetMap}`)
   const map = (await getRsp.json()) as GetMapRsp
   assert.equal(map.pins.length, 1)
+})
+
+/** The pins currently on {@link POST}, straight out of the fake Redis. */
+function storedPins(): Pin[] {
+  const hash = redisHashes.get(`pins:${POST}`) ?? new Map()
+  return [...hash.values()].map(json => JSON.parse(json) as Pin)
+}
+
+/** The Index Post's cached count for this Map. */
+function storedPinCount(): number | undefined {
+  return redisSets.get('index-pins')?.get(POST)
+}
+
+test('import pins: owner adds a whole export at once', async () => {
+  seedMap({
+    ownerId: OWNER,
+    pins: [{id: 'p1', location: {lat: 1, lng: 2}, title: 'Cafe'}],
+  })
+
+  const req: ImportPinsReq = {
+    pins: [
+      {title: 'Park', location: {lat: 3, lng: 4}, category: 'Outdoors'},
+      {
+        title: 'Museum',
+        location: {lat: 5, lng: 6},
+        description: 'Closed Mondays',
+        link: 'https://example.com/',
+      },
+    ],
+  }
+  const rsp = await postJson(Endpoint.ImportPins, req)
+  assert.equal(rsp.status, 200)
+  const body = (await rsp.json()) as ImportPinsRsp
+  assert.equal(body.pins.length, 2)
+  assert.equal(body.droppedImages, 0)
+  assert.deepEqual(
+    body.pins.map(pin => pin.title),
+    ['Park', 'Museum'],
+  )
+  assert.equal(body.pins[0]?.category, 'Outdoors')
+  assert.equal(body.pins[1]?.link, 'https://example.com/')
+
+  // Added, never replaced: the Pin that was already there is still there.
+  const getRsp = await fetch(`${serverURL}/${Endpoint.GetMap}`)
+  const map = (await getRsp.json()) as GetMapRsp
+  assert.equal(map.pins.length, 3)
+  assert.ok(map.pins.some(pin => pin.id === 'p1'))
+})
+
+test('import pins: every pin gets a fresh id, whatever the export said', async () => {
+  seedMap({
+    ownerId: OWNER,
+    pins: [{id: 'p1', location: {lat: 1, lng: 2}, title: 'Cafe'}],
+  })
+
+  // An id in the text must not be able to overwrite a Pin already on the Map.
+  const rsp = await postJson(Endpoint.ImportPins, {
+    pins: [{id: 'p1', title: 'Impostor', location: {lat: 3, lng: 4}}],
+  })
+  assert.equal(rsp.status, 200)
+  const body = (await rsp.json()) as ImportPinsRsp
+  assert.notEqual(body.pins[0]?.id, 'p1')
+  assert.equal(storedPins().length, 2)
+  assert.ok(storedPins().some(pin => pin.title === 'Cafe'))
+})
+
+test('import pins: the cached count rises by exactly what landed', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+  redisSets.set('index-pins', new Map([[POST, 0]]))
+
+  const req: ImportPinsReq = {
+    pins: [
+      {title: 'A', location: {lat: 1, lng: 2}},
+      {title: 'B', location: {lat: 3, lng: 4}},
+      {title: 'C', location: {lat: 5, lng: 6}},
+    ],
+  }
+  await postJson(Endpoint.ImportPins, req)
+  assert.equal(storedPinCount(), 3)
+})
+
+test('import pins: a Reddit-hosted image survives, another host does not', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+
+  const req: ImportPinsReq = {
+    pins: [
+      {
+        title: 'Kept',
+        location: {lat: 1, lng: 2},
+        imageUrl: 'https://i.redd.it/abc.jpg',
+      },
+      {
+        title: 'Dropped',
+        location: {lat: 3, lng: 4},
+        imageUrl: 'https://evil.example/abc.jpg',
+      },
+      {
+        title: 'Also dropped',
+        location: {lat: 5, lng: 6},
+        imageUrl: 'https://i.redd.it.evil.example/abc.jpg',
+      },
+    ],
+  }
+  const rsp = await postJson(Endpoint.ImportPins, req)
+  const body = (await rsp.json()) as ImportPinsRsp
+  assert.equal(body.droppedImages, 2)
+  assert.equal(body.pins[0]?.imageUrl, 'https://i.redd.it/abc.jpg')
+  assert.equal(body.pins[1]?.imageUrl, undefined)
+  assert.equal(body.pins[2]?.imageUrl, undefined)
+  // The picture is dropped; the Pin is not.
+  assert.equal(body.pins.length, 3)
+})
+
+test('import pins: one bad entry writes none of them', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+
+  const req = {
+    pins: [
+      {title: 'Fine', location: {lat: 1, lng: 2}},
+      {title: 'Broken', location: {lat: 91, lng: 2}},
+      {title: 'Also fine', location: {lat: 5, lng: 6}},
+    ],
+  }
+  const rsp = await postJson(Endpoint.ImportPins, req)
+  assert.equal(rsp.status, 400)
+  const body = (await rsp.json()) as ErrorRsp
+  assert.match(body.error, /Pin 2 \("Broken"\)/)
+  assert.equal(storedPins().length, 0)
+  assert.equal(storedPinCount(), undefined)
+})
+
+test('import pins: a pin with no title is refused', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+
+  const rsp = await postJson(Endpoint.ImportPins, {
+    pins: [{location: {lat: 1, lng: 2}}],
+  })
+  assert.equal(rsp.status, 400)
+  assert.equal(storedPins().length, 0)
+})
+
+test('import pins: nothing to add is refused rather than silently doing nothing', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+
+  const rsp = await postJson(Endpoint.ImportPins, {pins: []})
+  assert.equal(rsp.status, 400)
+})
+
+test('import pins: more than one import may carry is refused', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+
+  const many = Array.from({length: PinImportMaxCount + 1}, (_, i) => ({
+    title: `Pin ${i}`,
+    location: {lat: 1, lng: 2},
+  }))
+  const rsp = await postJson(Endpoint.ImportPins, {pins: many})
+  assert.equal(rsp.status, 400)
+  assert.equal(storedPins().length, 0)
+})
+
+test('import pins: a non-owner is forbidden', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+  requestUserId = 't2_viewer' as T2
+
+  const rsp = await postJson(Endpoint.ImportPins, {
+    pins: [{title: 'A', location: {lat: 1, lng: 2}}],
+  })
+  assert.equal(rsp.status, 403)
+  assert.equal(storedPins().length, 0)
+})
+
+test('import pins: 404 when the post has no map', async () => {
+  const rsp = await postJson(Endpoint.ImportPins, {
+    pins: [{title: 'A', location: {lat: 1, lng: 2}}],
+  })
+  assert.equal(rsp.status, 404)
+})
+
+test('import pins: a location given as a maps link is refused, not resolved', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+
+  // The format has no field a URL can be a Location in, which is the whole of
+  // what keeps ADR-0015 true of a route that takes a list. See ADR-0017.
+  const rsp = await postJson(Endpoint.ImportPins, {
+    pins: [
+      {
+        title: 'Somewhere',
+        location: 'https://www.google.com/maps/@35.6586,139.7454,17z',
+      },
+    ],
+  })
+  assert.equal(rsp.status, 400)
+  assert.equal(storedPins().length, 0)
+  // And nothing was fetched to find out where that link goes.
+  assert.deepEqual(upstreamReqs, [])
 })
 
 test("every form the app shows satisfies Devvit's own field rules", async () => {
@@ -1413,6 +1623,70 @@ test('index: a removed post is hidden but stays indexed', async () => {
   )
   // A moderator can put it back, so the index keeps it.
   assert.equal(redisSets.get('index')?.has(removed), true)
+})
+
+test('index: a post its owner deleted on Reddit is unlisted at once', async () => {
+  const gone = 't3_gone' as T3
+  const alive = 't3_alive' as T3
+  seedIndexed(gone, {title: 'Gone', author: 'anna', createdAt: 2})
+  seedIndexed(alive, {title: 'Alive', author: 'bob', createdAt: 1})
+  // Reddit answers for a deleted post rather than failing, so this is not a
+  // miss and nothing waits for it to happen three times.
+  seedRedditPost(gone, {removedByCategory: 'deleted'})
+  seedRedditPost(alive)
+  redisValues.set(`owner:${gone}`, OWNER)
+
+  const body = (await (await getIndex()).json()) as GetIndexRsp
+  assert.deepEqual(
+    body.entries.map(entry => entry.t3),
+    [alive],
+  )
+  assert.equal(body.total, 2, 'the page it was counted for was already sized')
+
+  assert.equal(redisSets.get('index')?.has(gone), false)
+  assert.equal(redisSets.get('index-pins')?.has(gone), false)
+  assert.equal(redisHashes.get('index-meta')?.has(gone), false)
+  // Nothing was counted against it: an answer is not a missed read.
+  assert.equal(redisSets.get('index-miss')?.has(gone) ?? false, false)
+  // The Pins stay put, as they do for every unlisting.
+  assert.equal(redisValues.get(`owner:${gone}`), OWNER)
+
+  const after = (await (await getIndex()).json()) as GetIndexRsp
+  assert.equal(after.total, 1)
+})
+
+test('index: a deletion recorded against the author unlists too', async () => {
+  const gone = 't3_gone' as T3
+  seedIndexed(gone, {title: 'Gone', author: 'anna', createdAt: 2})
+  seedIndexed('t3_alive' as T3, {title: 'Alive', author: 'bob', createdAt: 1})
+  seedRedditPost(gone, {removedByCategory: 'author'})
+  seedRedditPost('t3_alive' as T3)
+
+  const body = (await (await getIndex()).json()) as GetIndexRsp
+  assert.deepEqual(
+    body.entries.map(entry => entry.t3),
+    ['t3_alive'],
+  )
+  assert.equal(redisSets.get('index')?.has(gone), false)
+})
+
+test('index: a moderator s removal is hidden but stays indexed', async () => {
+  const removed = 't3_removed' as T3
+  seedIndexed(removed, {title: 'Removed', author: 'anna', createdAt: 2})
+  seedIndexed('t3_alive' as T3, {title: 'Alive', author: 'bob', createdAt: 1})
+  // The category a mod removal carries — off the page, but the Map keeps its
+  // row, because only the author's own deletion is the irreversible one.
+  seedRedditPost(removed, {removed: true, removedByCategory: 'moderator'})
+  seedRedditPost('t3_alive' as T3)
+  redisValues.set(`owner:${removed}`, OWNER)
+
+  const body = (await (await getIndex()).json()) as GetIndexRsp
+  assert.deepEqual(
+    body.entries.map(entry => entry.t3),
+    ['t3_alive'],
+  )
+  assert.equal(redisSets.get('index')?.has(removed), true)
+  assert.equal(redisValues.get(`owner:${removed}`), OWNER)
 })
 
 test('index: an unreachable Reddit omits scores and unlists nothing', async () => {

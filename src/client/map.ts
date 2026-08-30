@@ -23,12 +23,15 @@ import {
   type Pin,
   type UpdatePinReq,
 } from '../shared/api.ts'
+import {formatPinsFile, parsePinsFile} from '../shared/pins-file.ts'
+import {categoryColors, pinColor} from './category-color.ts'
 import {
   fetchAddPin,
   fetchClearDefaultArea,
   fetchDeletePin,
   fetchDeletePost,
   fetchGetMap,
+  fetchImportPins,
   fetchSetDefaultArea,
   fetchUpdatePin,
   installProxyProtocol,
@@ -47,7 +50,13 @@ import {
   setSidebarOpen,
 } from './sidebar.ts'
 
-const mapStatus = document.getElementById('map-status') as HTMLParagraphElement
+const mapStatus = document.getElementById('map-status') as HTMLDivElement
+const mapStatusText = document.getElementById(
+  'map-status-text',
+) as HTMLParagraphElement
+const mapStatusHelp = document.getElementById(
+  'map-status-help',
+) as HTMLButtonElement
 const addPinBtn = document.getElementById('add-pin-btn') as HTMLButtonElement
 const areaBtn = document.getElementById('area-btn') as HTMLButtonElement
 const areaSaveBtn = document.getElementById(
@@ -69,6 +78,7 @@ const filterCloseBtn = document.getElementById(
 const categoryFilterSelect = document.getElementById(
   'category-filter',
 ) as HTMLSelectElement
+const filterSwatch = document.getElementById('filter-swatch') as HTMLElement
 const categoryOptionsDatalist = document.getElementById(
   'category-options',
 ) as HTMLDataListElement
@@ -100,8 +110,34 @@ const pinRemoveImageBtn = document.getElementById(
 const pinDeleteBtn = document.getElementById('pin-delete') as HTMLButtonElement
 const pinCancelBtn = document.getElementById('pin-cancel') as HTMLButtonElement
 
-/** MapLibre's default marker colour, restated so selection can swap it. */
-const markerColor = '#3fb1ce'
+const linkHelpDialog = document.getElementById(
+  'link-help-dialog',
+) as HTMLDialogElement
+const linkHelpCloseBtn = document.getElementById(
+  'link-help-close',
+) as HTMLButtonElement
+
+const pinsIoBtn = document.getElementById('pins-io-btn') as HTMLButtonElement
+const pinsIoDialog = document.getElementById(
+  'pins-io-dialog',
+) as HTMLDialogElement
+const pinsIoExportText = document.getElementById(
+  'pins-io-export-text',
+) as HTMLTextAreaElement
+const pinsIoImportText = document.getElementById(
+  'pins-io-import-text',
+) as HTMLTextAreaElement
+const pinsIoCopyBtn = document.getElementById(
+  'pins-io-copy',
+) as HTMLButtonElement
+const pinsIoAddBtn = document.getElementById('pins-io-add') as HTMLButtonElement
+const pinsIoCloseBtn = document.getElementById(
+  'pins-io-close',
+) as HTMLButtonElement
+const pinsIoNote = document.getElementById(
+  'pins-io-note',
+) as HTMLParagraphElement
+
 /** Reddit's OrangeRed, the same accent the Sidebar marks a Selected Pin with. */
 const selectedMarkerColor = '#d93a00'
 
@@ -226,6 +262,12 @@ let pins: Pin[] = []
  */
 let defaultArea: MapBounds | undefined
 const markers = new Map<string, Marker>()
+/**
+ * Which colour each Category on this Map wears, rebuilt whenever the Pins
+ * change and never when only the filter or the selection does — a colour
+ * belongs to the Category, so narrowing the Map to one must not repaint it.
+ */
+let categoryColorByName = new Map<string, string>()
 
 let activeCategory = ''
 let selectedPinId: string | undefined
@@ -281,6 +323,7 @@ async function init(): Promise<void> {
   document.body.classList.add('viewer-mode')
   deletePostBtn.hidden = true
   areaBtn.hidden = true
+  pinsIoBtn.hidden = true
 
   const data = await fetchGetMap(!isPreview)
   // Nothing to draw and nothing wired up, so the toolbar the page painted
@@ -298,6 +341,7 @@ async function init(): Promise<void> {
   document.body.classList.toggle('viewer-mode', !isOwner)
   // The Preview has no toolbar to hold either of them.
   deletePostBtn.hidden = isPreview || !isOwner
+  pinsIoBtn.hidden = isPreview || !isOwner
   // Unlike every other control in the toolbar this one answers to moderating
   // the subreddit rather than to owning the Map, and the two have nothing to do
   // with each other: a moderator sets where every Map opens from whichever Map
@@ -308,6 +352,7 @@ async function init(): Promise<void> {
   // toolbar to fill in, and one button that leaves for the reading that has all
   // three.
   if (isPreview) {
+    categoryColorByName = categoryColors(pins)
     renderMarkers(pins)
     fitToPins()
     wireOpenMap()
@@ -360,6 +405,8 @@ function wireMapGestures(): void {
 }
 
 function render(): void {
+  // From every Pin, not the visible ones: see {@link categoryColorByName}.
+  categoryColorByName = categoryColors(pins)
   const visible = filterPins(pins, activeCategory)
   const previouslySelected = selectedPinId
   selectedPinId = resolveSelection(selectedPinId, visible)
@@ -369,7 +416,9 @@ function render(): void {
     selectedPinId,
     isOwner,
     filtered: !!activeCategory,
+    categoryColors: categoryColorByName,
   })
+  showFilterSwatch()
   // Losing the Selected Pin to a filter or a deletion lands in the same place
   // as letting go of it deliberately: the whole Map.
   if (previouslySelected && !selectedPinId) fitToPins(true)
@@ -426,7 +475,7 @@ function createMarker(pin: Pin): Marker {
   // marker can never drag a Pin somewhere by accident.
   const draggable = selected && isOwner
   const marker = new Marker({
-    color: selected ? selectedMarkerColor : markerColor,
+    color: selected ? selectedMarkerColor : pinColor(pin, categoryColorByName),
     draggable,
   })
     .setLngLat([pin.location.lng, pin.location.lat])
@@ -571,6 +620,20 @@ function renderCategoryOptions(): void {
 }
 
 /**
+ * Puts the active Category's own colour beside the filter, and takes it away
+ * with the filter. Called from {@link render} rather than from wherever the
+ * filter changed, so it always reads a {@link categoryColorByName} built from
+ * the Pins now on the Map and can never disagree with the markers it describes.
+ */
+function showFilterSwatch(): void {
+  const color = activeCategory
+    ? categoryColorByName.get(activeCategory)
+    : undefined
+  filterSwatch.hidden = !color
+  if (color) filterSwatch.style.background = color
+}
+
+/**
  * Shows one of the toolbar's faces in place of whichever is showing now. Only
  * ever one of them is in the flow, so the toolbar keeps its one-row height.
  */
@@ -608,6 +671,11 @@ function setToolbarFace(face: ToolbarFace): void {
  * Owner is mid-gesture and clicking the Map is still open to them.
  */
 function dropPastedLink(text: string): void {
+  // A paste is the gesture the help panel describes, so arriving here is the
+  // end of needing to read it — and whatever this says next is said over the
+  // Map, behind a modal that would hide it.
+  closeLinkHelp()
+
   const link = parseMapLink(text)
   if (link.kind === 'shortened') {
     flashStatus(
@@ -716,7 +784,23 @@ async function clearDefaultArea(): Promise<void> {
 function setStatus(text: string): void {
   if (statusTimeout) clearTimeout(statusTimeout)
   statusTimeout = undefined
-  mapStatus.textContent = text
+  writeStatus(text)
+}
+
+/**
+ * Writes what the status line says and decides what it carries beside the
+ * words. The pill hides itself when there is nothing to say — it can no longer
+ * do that with `:empty`, since the help button lives inside it.
+ *
+ * The help button appears only alongside {@link dropInstruction}, and only
+ * where that instruction mentions pasting at all: it explains the one gesture
+ * the Map cannot demonstrate, and a device that was never offered the paste has
+ * nothing to be told. See ADR-0015.
+ */
+function writeStatus(text: string): void {
+  mapStatusText.textContent = text
+  mapStatus.hidden = !text
+  mapStatusHelp.hidden = !canPasteMapLink || text !== dropInstruction
 }
 
 /**
@@ -729,7 +813,7 @@ function setStatus(text: string): void {
 function flashStatus(text: string, thenShow: string = ''): void {
   setStatus(text)
   statusTimeout = setTimeout(() => {
-    mapStatus.textContent = thenShow
+    writeStatus(thenShow)
     statusTimeout = undefined
   }, flashStatusMs)
 }
@@ -874,7 +958,121 @@ function stopDroppingPin(): void {
   droppingPin = false
   addPinBtn.setAttribute('aria-pressed', 'false')
   document.getElementById('map')?.style.removeProperty('cursor')
+  closeLinkHelp()
   setStatus('')
+}
+
+/**
+ * How the paste is done, which the instruction over the Map has room to name
+ * but not to explain. It opens over the armed drop rather than replacing it:
+ * the Owner reads it and pastes, and the drop they armed is still waiting.
+ */
+function closeLinkHelp(): void {
+  if (linkHelpDialog.open) linkHelpDialog.close()
+}
+
+/**
+ * Opens Import and Export, which are one dialog because they are one idea from
+ * either end: the text Export writes is the text Import reads.
+ *
+ * Export needs no round trip. The Map already holds every Pin it is showing —
+ * that is what the Sidebar is drawn from — so the text is written here, from
+ * the same array, and is current by construction.
+ *
+ * An armed drop is disarmed on the way in. The document-level paste listener is
+ * live while one is armed and would take a paste meant for the Import field,
+ * feeding an Export to `parseMapLink` and refusing it as an unreadable Map Link.
+ */
+function openPinsIo(): void {
+  stopDroppingPin()
+  pinsIoExportText.value = formatPinsFile(pins)
+  pinsIoImportText.value = ''
+  setPinsIoNote('')
+  pinsIoDialog.showModal()
+}
+
+/**
+ * Copies the Export. A web view is a sandboxed frame and may refuse both ways
+ * of writing to the clipboard, so this says which of the two happened rather
+ * than reporting a success it did not have — and either way the field is
+ * selectable and left selected, so the Owner can always finish the copy
+ * themselves.
+ */
+async function copyExport(): Promise<void> {
+  pinsIoExportText.focus()
+  pinsIoExportText.select()
+  try {
+    await navigator.clipboard.writeText(pinsIoExportText.value)
+    setPinsIoNote(`Copied ${countLabel(pins.length)}.`)
+    return
+  } catch {
+    // Falls through to the older gesture, which some sandboxes still allow.
+  }
+  if (document.execCommand('copy')) {
+    setPinsIoNote(`Copied ${countLabel(pins.length)}.`)
+    return
+  }
+  setPinsIoNote(
+    'Could not copy for you — the text is selected, so press ⌘C or Ctrl+C.',
+    true,
+  )
+}
+
+/**
+ * Adds the pasted Export's Pins to this Map. The text is read here first, with
+ * the same reader the server uses, so an Owner who has mistyped something is
+ * told which entry and where without waiting on a round trip.
+ *
+ * The server reads it again and is the authority. It failing after this
+ * succeeded means the two disagreed rather than that the text was bad, which is
+ * not something the Owner can act on — so that case says so plainly instead of
+ * inventing a reason, and leaves the text where it is either way.
+ */
+async function importPins(): Promise<void> {
+  const read = parsePinsFile(pinsIoImportText.value)
+  if ('error' in read) {
+    setPinsIoNote(read.error, true)
+    return
+  }
+
+  pinsIoAddBtn.disabled = true
+  setPinsIoNote(`Adding ${countLabel(read.pins.length)}…`)
+  const rsp = await fetchImportPins({pins: read.pins})
+  pinsIoAddBtn.disabled = false
+  if (!rsp) {
+    setPinsIoNote('Those pins could not be added. Try again in a moment.', true)
+    return
+  }
+
+  pins = [...pins, ...rsp.pins]
+  renderCategoryOptions()
+  // Nothing selected is what frames the whole Map, which is the only view that
+  // shows an Owner what they just added alongside what was already there.
+  selectedPinId = undefined
+  render()
+  setSidebarOpen(!isNarrowViewport() && pins.length > 0)
+  fitToPins(true)
+  pinsIoDialog.close()
+  flashStatus(addedLabel(rsp.pins.length, rsp.droppedImages))
+}
+
+/** What the Map says once an Import has landed and the dialog has gone. */
+function addedLabel(added: number, droppedImages: number): string {
+  const pinsAdded = `Added ${countLabel(added)}.`
+  if (!droppedImages) return pinsAdded
+  const images =
+    droppedImages === 1 ? 'One image was' : `${droppedImages} images were`
+  return `${pinsAdded} ${images} left out — only images uploaded here can be carried over.`
+}
+
+function countLabel(count: number): string {
+  return count === 1 ? '1 pin' : `${count} pins`
+}
+
+/** What the dialog has to say about the last thing tried in it. */
+function setPinsIoNote(text: string, isError: boolean = false): void {
+  pinsIoNote.textContent = text
+  pinsIoNote.classList.toggle('error', isError && !!text)
 }
 
 function readImageAsDataUrl(file: File): Promise<string> {
@@ -986,10 +1184,18 @@ function wireEvents(): void {
     if (droppingPin) stopDroppingPin()
     else startDroppingPin()
   })
+  mapStatusHelp.addEventListener('click', () => linkHelpDialog.showModal())
+  linkHelpCloseBtn.addEventListener('click', () => linkHelpDialog.close())
+
   // An armed drop is waiting on the Map, so it has to be cancellable from
-  // there — by then the keyboard is nowhere near the toolbar.
+  // there — by then the keyboard is nowhere near the toolbar. The help panel
+  // takes Escape first, though: the dialog closes on it and the event carries
+  // on up to here, and one press should not both close what was opened over
+  // the drop and cancel the drop underneath it.
   document.addEventListener('keydown', ev => {
-    if (ev.key === 'Escape' && droppingPin) stopDroppingPin()
+    if (ev.key !== 'Escape' || !droppingPin) return
+    if (linkHelpDialog.open) return
+    stopDroppingPin()
   })
 
   // The other way to answer an armed drop, and the reason it needs no field of
@@ -1040,6 +1246,19 @@ function wireEvents(): void {
   // nothing left holding a reference to remove it by.
   pinDialog.addEventListener('close', () => closePinDialog())
   pinDeleteBtn.addEventListener('click', () => void deleteEditingPin())
+
+  pinsIoBtn.addEventListener('click', () => openPinsIo())
+  pinsIoCopyBtn.addEventListener('click', () => void copyExport())
+  pinsIoAddBtn.addEventListener('click', () => void importPins())
+  pinsIoCloseBtn.addEventListener('click', () => pinsIoDialog.close())
+  // Escape closes the dialog without passing through Close, so what has to be
+  // forgotten hangs off the dialog rather than off that button: a paste left
+  // behind would be waiting in the field the next time it opened, and an
+  // Import is not something to re-offer someone who walked away from it.
+  pinsIoDialog.addEventListener('close', () => {
+    pinsIoImportText.value = ''
+    setPinsIoNote('')
+  })
 }
 
 void init()

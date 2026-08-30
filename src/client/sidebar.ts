@@ -1,4 +1,5 @@
 import type {Pin} from '../shared/api.ts'
+import {pinColor, uncategorizedColor} from './category-color.ts'
 
 /** A run of Pins sharing a Category, or the uncategorized run. */
 export type PinGroup = {
@@ -84,6 +85,11 @@ export type SidebarState = {
   isOwner: boolean
   /** Whether a Category filter is what emptied the list, if it is empty. */
   filtered: boolean
+  /**
+   * Every Category on the Map to its colour — the whole Map's, not the visible
+   * Pins', so a filter narrows what is listed without repainting it.
+   */
+  categoryColors: Map<string, string>
 }
 
 const uncategorizedHeading = 'Uncategorized'
@@ -152,12 +158,24 @@ export function renderSidebar(state: SidebarState): void {
     if (headings) {
       const heading = document.createElement('h2')
       heading.className = 'pin-group-heading'
-      heading.textContent = group.category ?? uncategorizedHeading
+      heading.append(
+        swatch(
+          group.category
+            ? (state.categoryColors.get(group.category) ?? uncategorizedColor)
+            : uncategorizedColor,
+        ),
+        group.category ?? uncategorizedHeading,
+      )
       section.append(heading)
     }
     for (const pin of group.pins) {
       section.append(
-        pinCard(pin, state.isOwner, pin.id === state.selectedPinId),
+        pinCard(
+          pin,
+          state.isOwner,
+          pin.id === state.selectedPinId,
+          state.categoryColors,
+        ),
       )
     }
     listEl.append(section)
@@ -218,7 +236,27 @@ function externalLinkIcon(): SVGSVGElement {
   return svg
 }
 
-function pinCard(pin: Pin, isOwner: boolean, selected: boolean): HTMLElement {
+/**
+ * The dot that ties a name in the Sidebar to the markers wearing that colour on
+ * the Map. It is what makes the colours mean anything: the Map itself has no
+ * legend, so this list is it. Hidden from the accessibility tree because the
+ * name it sits beside already says everything it does — and because colour is
+ * never the only thing carrying the Category here.
+ */
+function swatch(color: string): HTMLElement {
+  const dot = document.createElement('span')
+  dot.className = 'category-swatch'
+  dot.style.background = color
+  dot.setAttribute('aria-hidden', 'true')
+  return dot
+}
+
+function pinCard(
+  pin: Pin,
+  isOwner: boolean,
+  selected: boolean,
+  colors: Map<string, string>,
+): HTMLElement {
   // A card holds a link and (for Owners) an edit button, and a <button> may not
   // contain an <a> — hence a div carrying the button role by hand.
   const card = document.createElement('div')
@@ -273,7 +311,7 @@ function pinCard(pin: Pin, isOwner: boolean, selected: boolean): HTMLElement {
   if (pin.category) {
     const category = document.createElement('span')
     category.className = 'pin-card-category'
-    category.textContent = pin.category
+    category.append(swatch(pinColor(pin, colors)), pin.category)
     body.append(category)
   }
 

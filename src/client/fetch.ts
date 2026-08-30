@@ -9,6 +9,8 @@ import {
   Endpoint,
   GetMapFullParam,
   type GetMapRsp,
+  type ImportPinsReq,
+  type ImportPinsRsp,
   type SetDefaultAreaReq,
   type SetDefaultAreaRsp,
   type UpdatePinReq,
@@ -45,6 +47,16 @@ export async function fetchDeletePin(
   req: DeletePinReq,
 ): Promise<DeletePinRsp | undefined> {
   return fetchJson(Endpoint.DeletePin, req)
+}
+
+/**
+ * Adds a whole Export's worth of Pins at once. Names no Map for the reason
+ * every Pin route does not: the Map is the Post this page is running in.
+ */
+export async function fetchImportPins(
+  req: ImportPinsReq,
+): Promise<ImportPinsRsp | undefined> {
+  return fetchJson(Endpoint.ImportPins, req)
 }
 
 /** Takes no arguments: the Post to delete is the one this page is running in. */

@@ -59,15 +59,28 @@ export async function dbIsMap(t3: T3): Promise<boolean> {
 }
 
 export async function dbAddPin(t3: T3, pin: Pin): Promise<void> {
+  await dbAddPins(t3, [pin])
+}
+
+/**
+ * Adds any number of Pins in one transaction — one Pin from a Pin Drop, or a
+ * whole Export from an Import. Every `pin.id` is a fresh `crypto.randomUUID()`
+ * from the caller, so every field below is new and the count always wants the
+ * increment; it is the size of the batch rather than a decision.
+ *
+ * The hSet and the increment go together for the reason a single add always
+ * did: a crash between the two leaves the pin hash and the cached count
+ * disagreeing about whether a Map with Pins is listed, and an Import makes
+ * that gap the size of the Export rather than one Pin.
+ */
+export async function dbAddPins(t3: T3, pins: readonly Pin[]): Promise<void> {
   await requireOwnerExists(t3)
-  // `pin.id` is a fresh `crypto.randomUUID()` from the caller, so this field
-  // is always new — the write below always wants the increment. It still goes
-  // through one transaction with the hSet: a crash between the two used to be
-  // able to leave the pin hash and the cached count disagreeing about whether
-  // a Map with Pins was listed.
+  if (!pins.length) return
+  const fields: {[id: string]: string} = {}
+  for (const pin of pins) fields[pin.id] = JSON.stringify(pin)
   await atomically(async tx => {
-    await tx.hSet(pinsKey(t3), {[pin.id]: JSON.stringify(pin)})
-    await tx.zIncrBy(INDEX_PINS_KEY, t3, 1)
+    await tx.hSet(pinsKey(t3), fields)
+    await tx.zIncrBy(INDEX_PINS_KEY, t3, pins.length)
   })
 }
 

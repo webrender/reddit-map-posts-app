@@ -25,6 +25,8 @@ import {
   type GetIndexRsp,
   GetMapFullParam,
   type GetMapRsp,
+  type ImportPinsReq,
+  type ImportPinsRsp,
   type IndexEntry,
   IndexPageSize,
   IndexPostFormName,
@@ -47,7 +49,17 @@ import {
   type UpdatePinRsp,
 } from '../shared/api.ts'
 import {
+  isRedditMediaUrl,
+  PinCategoryMaxLen,
+  PinDescriptionMaxLen,
+  type PinExport,
+  PinLinkMaxLen,
+  PinTitleMaxLen,
+  readPinsValue,
+} from '../shared/pins-file.ts'
+import {
   dbAddPin,
+  dbAddPins,
   dbClearIndexMiss,
   dbCreateMap,
   dbDeleteDefaultArea,
@@ -93,7 +105,9 @@ const ScoreRefreshChunk = 25
 /**
  * How many failed reads in a row it takes to unlist a Map Post. More than one,
  * because one is indistinguishable from Reddit having a bad second; small,
- * because until it is reached a deleted post keeps a row nobody can use.
+ * because until it is reached an unreadable post keeps a row nobody can use.
+ * A post Reddit does answer for does not come through here at all — see
+ * {@link deletedByAuthor}.
  */
 const IndexMissLimit = 3
 
@@ -104,6 +118,7 @@ type AnyRsp =
   | AddPinRsp
   | UpdatePinRsp
   | DeletePinRsp
+  | ImportPinsRsp
   | DeletePostRsp
   | DeleteIndexPostRsp
   | SetDefaultAreaRsp
@@ -167,6 +182,9 @@ async function route(
         break
       case Endpoint.DeletePin:
         rsp = await routeDeletePin(reqMsg)
+        break
+      case Endpoint.ImportPins:
+        rsp = await routeImportPins(reqMsg)
         break
       case Endpoint.SetDefaultArea:
         rsp = await routeSetDefaultArea(reqMsg)
@@ -244,11 +262,12 @@ async function routeAddPin(reqMsg: IncomingMessage): Promise<AddPinRsp> {
 
   const pin: Pin = {
     id: crypto.randomUUID(),
+    createdAt: Date.now(),
     location: normalizeLocation(req.location),
     title: normalizeTitle(req.title),
   }
-  if (req.category) pin.category = req.category
-  if (req.description) pin.description = req.description
+  if (req.category) pin.category = normalizeCategory(req.category)
+  if (req.description) pin.description = normalizeDescription(req.description)
   if (req.link) pin.link = normalizeLink(req.link)
   if (req.imageDataUrl) {
     const asset = await media.upload({url: req.imageDataUrl, type: 'image'})
@@ -268,9 +287,12 @@ async function routeUpdatePin(reqMsg: IncomingMessage): Promise<UpdatePinRsp> {
   if (req.location !== undefined)
     patch.location = normalizeLocation(req.location)
   if (req.title !== undefined) patch.title = normalizeTitle(req.title)
-  if (req.category !== undefined) patch.category = req.category || undefined
+  if (req.category !== undefined)
+    patch.category = req.category ? normalizeCategory(req.category) : undefined
   if (req.description !== undefined)
-    patch.description = req.description || undefined
+    patch.description = req.description
+      ? normalizeDescription(req.description)
+      : undefined
   if (req.link !== undefined) {
     patch.link = req.link ? normalizeLink(req.link) : undefined
   }
@@ -291,6 +313,66 @@ async function routeDeletePin(reqMsg: IncomingMessage): Promise<DeletePinRsp> {
   const req = await readJson<DeletePinReq>(reqMsg)
   await dbDeletePin(t3, req.id)
   return {ok: true}
+}
+
+/**
+ * Adds a whole Export's worth of Pins at once. Gated exactly as every other Pin
+ * mutation is — the Owner of the Post the request came from, and no one else.
+ *
+ * Every entry is checked before any of them is written. An Import that applied
+ * most of itself would leave the Owner with no clean retry: Import only ever
+ * adds, so running it again after a fix would duplicate whatever had already
+ * landed. All of it or none of it is the only shape that can be tried twice.
+ *
+ * Nothing here reads a URL for a Location. A Pin's Location arrives as two
+ * numbers or the entry is refused, which is what keeps ADR-0015's rule — the
+ * app never takes a list of links — true of a route that takes a list. See
+ * ADR-0017.
+ */
+async function routeImportPins(
+  reqMsg: IncomingMessage,
+): Promise<ImportPinsRsp> {
+  const t3 = requirePostId()
+  await requireOwnedMap(t3)
+  const req = await readJson<ImportPinsReq>(reqMsg)
+
+  // The client has already read the Owner's text with this same reader, and is
+  // asked again here for the reason every route asks: what arrives is a body,
+  // not a promise.
+  const read = readPinsValue(req)
+  if ('error' in read) throw new HttpError(400, read.error)
+
+  const pins = read.pins.map(toPin)
+  await dbAddPins(t3, pins)
+  return {pins, droppedImages: read.droppedImages}
+}
+
+/**
+ * One imported entry as a Pin. The id is the server's, always: an Export
+ * describes Pins rather than naming them, and letting a pasted id through
+ * would let one Import overwrite the Pins of an earlier one. `createdAt` is
+ * the server's for the same reason, and says when this Map got the Pin rather
+ * than when the Map it came from did.
+ *
+ * `imageUrl` is the one field here that was never storable without an upload.
+ * {@link parsePinsFile} has already dropped any that is not on a host this app
+ * could have uploaded to; this is where that becomes a stored value, and the
+ * check is on the server because the text it vets came from a person.
+ */
+function toPin(entry: PinExport): Pin {
+  const pin: Pin = {
+    id: crypto.randomUUID(),
+    createdAt: Date.now(),
+    location: normalizeLocation(entry.location),
+    title: normalizeTitle(entry.title),
+  }
+  if (entry.category) pin.category = normalizeCategory(entry.category)
+  if (entry.description)
+    pin.description = normalizeDescription(entry.description)
+  if (entry.link) pin.link = normalizeLink(entry.link)
+  if (entry.imageUrl && isRedditMediaUrl(entry.imageUrl))
+    pin.imageUrl = entry.imageUrl
+  return pin
 }
 
 /**
@@ -530,13 +612,18 @@ async function routeGetIndex(
  * is a bounded cost, and it answers two questions at once — what the score is
  * now, and whether the post is still there (ADR-0011).
  *
- * A post that could not be read is left off the page either way, since there is
- * nothing to send a reader to. What it takes to *unlist* one is more than that:
- * a read fails for two very different reasons, and Reddit rate-limiting one
- * call out of five looks exactly like the post having been deleted. Unlisting
- * is forever — nothing re-indexes a Map — so it waits for
- * {@link IndexMissLimit} failures in a row, and a single answer from Reddit
- * puts the count back to nothing.
+ * Deletion is not a failed read. Reddit answers for a post whose author deleted
+ * it, with a tombstone that says as much, so a deleted Map Post arrives here
+ * looking alive apart from that one field. That answer is Reddit naming what
+ * happened rather than us inferring it from silence, so it unlists on the spot
+ * — the wait below is what silence needs, not what an answer needs.
+ *
+ * A read that fails says nothing nearly so clearly. It is left off the page
+ * either way, since there is nothing to send a reader to, but *unlisting* one
+ * takes more: Reddit rate-limiting one call out of five looks exactly like the
+ * post having gone. Unlisting is forever — nothing re-indexes a Map — so it
+ * waits for {@link IndexMissLimit} failures in a row, and a single answer from
+ * Reddit puts the count back to nothing.
  *
  * A post that is merely *removed* is hidden but kept, since a moderator can put
  * it back. And if every read failed, Reddit is treated as unreachable rather
@@ -561,10 +648,37 @@ async function liveEntries(rows: readonly IndexRow[]): Promise<IndexEntry[]> {
     // Written only where there is something to forget, so the ordinary page
     // load stays five reads and no writes.
     if (misses.has(row.t3)) await dbClearIndexMiss(row.t3)
-    if (post.removed) continue
+    if (deletedByAuthor(post)) {
+      await dbUnlistMap(row.t3)
+      continue
+    }
+    // Any other removal category is hidden rather than gone: there is nowhere
+    // to send a reader now, but a moderator can put it back, so it keeps its
+    // row exactly as a `removed` post always has.
+    if (post.removed || post.removedByCategory) continue
     entries.push(toEntry(row, post.score))
   }
   return entries
+}
+
+/**
+ * Whether Reddit's answer for a post is a tombstone for one its author deleted.
+ * Deleting is not removing: `removed` is the moderator's flag and a
+ * self-deletion leaves it alone, so this field is the only thing that tells the
+ * two apart — and telling them apart is what decides whether a Map Post keeps
+ * its row. Without it a Map its Owner deleted from Reddit's own app read as a
+ * live post forever, since it is only the app's own Delete Map that ever
+ * reaches {@link dbDeleteMap}.
+ *
+ * Both of these categories mean the author: Reddit says `deleted` where a post
+ * was taken down from the author's own controls, and `author` where it records
+ * the removal as theirs. Neither is something a moderator can put back, which
+ * is what makes acting on them at once safe when a failed read is not.
+ */
+function deletedByAuthor(post: Post): boolean {
+  return (
+    post.removedByCategory === 'deleted' || post.removedByCategory === 'author'
+  )
 }
 
 /**
@@ -682,7 +796,30 @@ function normalizeTitle(title: string): string {
   // claim about a JSON body this route did not write.
   const trimmed = typeof title === 'string' ? title.trim() : ''
   if (!trimmed) throw new HttpError(400, 'title is required')
-  return trimmed
+  return capped(trimmed, PinTitleMaxLen, 'title')
+}
+
+/**
+ * A Pin's text, refused rather than stored when it runs past its ceiling.
+ * Those ceilings arrived with Import — no field had one while every Pin was
+ * typed into a form by the person looking at it — and they are applied here,
+ * on the path a typed Pin takes too, so the two cannot come to disagree about
+ * what a Pin may hold. They sit far past anything anyone writes by hand, so
+ * nothing that already exists is affected: a cap applies where a value is
+ * written, and a stored Pin over one is left alone.
+ */
+function normalizeCategory(category: string): string {
+  return capped(category.trim(), PinCategoryMaxLen, 'category')
+}
+
+function normalizeDescription(description: string): string {
+  return capped(description.trim(), PinDescriptionMaxLen, 'description')
+}
+
+function capped(value: string, maxLen: number, field: string): string {
+  if (value.length > maxLen)
+    throw new HttpError(400, `${field} must be ${maxLen} characters or fewer`)
+  return value
 }
 
 /**
@@ -711,7 +848,7 @@ function normalizeBounds(bounds: unknown): MapBounds {
 }
 
 function normalizeLink(link: string): string {
-  const trimmed = link.trim()
+  const trimmed = capped(link.trim(), PinLinkMaxLen, 'link')
   let url: URL
   try {
     url = new URL(trimmed)

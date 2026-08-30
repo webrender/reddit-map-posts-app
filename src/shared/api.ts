@@ -1,4 +1,5 @@
 import type {Form, T2, T3} from '@devvit/web/shared'
+import type {PinExport} from './pins-file.ts'
 
 /** Generic error detail for all responses. */
 export type ErrorRsp = {error: string; status: number}
@@ -85,6 +86,18 @@ function isLng(value: unknown): value is number {
 /** A single marked location on a Map. */
 export type Pin = {
   id: string
+  /**
+   * When the server first stored this Pin, in epoch ms. It is never read from a
+   * client and never written by an Export: an imported Pin is stamped as it is
+   * added, exactly as its id is minted then, so it stays indistinguishable from
+   * a dropped one. Absent on Pins stored before this field existed, which
+   * {@link categoryColors} reads as "older than everything that has one".
+   *
+   * It exists so a Map can say which of its Categories appeared first, which is
+   * the whole of what keeps a Category's colour still when another is added.
+   * See ADR-0018.
+   */
+  createdAt?: number
   location: LatLng
   title: string
   category?: string
@@ -143,6 +156,26 @@ export type UpdatePinRsp = {pin: Pin}
 
 export type DeletePinReq = {id: string}
 export type DeletePinRsp = {ok: true}
+
+/**
+ * Adds a set of Pins to this Map at once, read from an Export the Owner pasted
+ * in. It names no Map: the one it adds to is the Post the request came from,
+ * and only its Owner may ask.
+ *
+ * Every Pin is checked before any is written, so an Export with one bad entry
+ * adds nothing rather than most of itself — a half-applied Import has no clean
+ * retry, since Import only ever adds and re-running it would duplicate
+ * whatever landed. See ADR-0017.
+ */
+export type ImportPinsReq = {pins: PinExport[]}
+
+/**
+ * What landed. The Pins come back whole, with the ids the server minted, so the
+ * Map draws exactly what it now holds rather than guessing. `droppedImages`
+ * counts the Pins whose picture was on a host this app could not have uploaded
+ * to: the Pin is kept and the picture is not.
+ */
+export type ImportPinsRsp = {pins: Pin[]; droppedImages: number}
 
 /**
  * Makes the rectangle a moderator framed the subreddit's Default Area. It
@@ -356,6 +389,8 @@ export const Endpoint = {
   AddPin: 'api/pin/add',
   UpdatePin: 'api/pin/update',
   DeletePin: 'api/pin/delete',
+  /** Add a whole Export's worth of Pins at once. Owner only. */
+  ImportPins: 'api/pin/import',
   /** Store the framed rectangle as the subreddit's Default Area. Mods only. */
   SetDefaultArea: 'api/area/set',
   /** Forget it, so empty Maps open on the whole world again. Mods only. */
@@ -382,6 +417,7 @@ export const EndpointMethod = {
   [Endpoint.AddPin]: 'POST',
   [Endpoint.UpdatePin]: 'POST',
   [Endpoint.DeletePin]: 'POST',
+  [Endpoint.ImportPins]: 'POST',
   [Endpoint.SetDefaultArea]: 'POST',
   [Endpoint.ClearDefaultArea]: 'POST',
   [Endpoint.Proxy]: 'GET',

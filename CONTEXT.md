@@ -41,14 +41,14 @@ The form Reddit shows when someone asks for a new Map Post, asking for its title
 _Avoid_: Menu, dialog, modal (all name the mechanism; the form is the setup step)
 
 **Preview**:
-The Map Post as it is read inline: the Map alone, framed on every Pin, with labelled markers, no toolbar, no Sidebar, and no Selected Pin. It is locked — no click, drag, or pinch reaches it — because inline the gesture belongs to the feed the Map Post is scrolling past, and a Map Post that answers one steals it. Its single control, Open Map, floats over the Map and opens the Map Post full screen where everything else is. An Index Post lives under the same rule and answers it differently: it has no full screen to send anyone to, so it stays tappable and paginates instead. See ADR-0007 and ADR-0010.
+The Map Post as it is read inline: the Map alone, framed on every Pin, with labelled markers in their Category Colours, no toolbar, no Sidebar, and no Selected Pin. It is locked — no click, drag, or pinch reaches it — because inline the gesture belongs to the feed the Map Post is scrolling past, and a Map Post that answers one steals it. Its single control, Open Map, floats over the Map and opens the Map Post full screen where everything else is. An Index Post lives under the same rule and answers it differently: it has no full screen to send anyone to, so it stays tappable and paginates instead. See ADR-0007 and ADR-0010.
 _Avoid_: Splash, launch screen (Devvit's own name for a native screen that can precede a web view; a Preview is the web view, showing the real Map)
 
 **Map**:
 The interactive map rendered inside a Map Post, built with MapLibre GL using OpenFreeMap's Bright style. A Map holds zero or more Pins. It is always seen from directly overhead and north-up: one finger always pans, two fingers zoom, and the camera does nothing else — outside a Preview, where it does nothing at all.
 
 **Pin**:
-A single marked location on a Map. Requires a Location and a Title; Category, description, link, and an uploaded image are all optional. Its Location can be re-chosen by dragging its marker, whichever way it was first given: the Owner clicked the Map or pasted a Map Link carrying it, and the Title beside it is theirs to write either way, so a moved Pin can never end up disagreeing with a name it did not choose.
+A single marked location on a Map. Requires a Location and a Title; Category, description, link, and an uploaded image are all optional. It is marked in its Category Colour, and it also knows when this Map got it — stamped by the server, absent from an Export, and read only to decide which of a Map's Categories came first. Its Location can be re-chosen by dragging its marker, whichever way it was first given: the Owner clicked the Map or pasted a Map Link carrying it, and the Title beside it is theirs to write either way, so a moved Pin can never end up disagreeing with a name it did not choose.
 _Avoid_: Marker, point
 
 **Pin Drop**:
@@ -57,21 +57,33 @@ _Avoid_: Place Search, Manual Pin Drop (both name a distinction that no longer e
 
 **Map Link**:
 A Google Maps or Apple Maps URL pasted onto an armed Pin Drop. The app takes it apart on the device for the coordinates and the place name already written in it, and offers both in the New Pin form — a Location to save and a Title to keep or retype, neither of them a Pin until the Owner saves one. It is read, never resolved: nothing is sent anywhere, there is nothing to send it with, and a link that keeps its location behind a redirect — every short share link either provider hands out — is refused rather than followed. That refusal is why this is a desktop convenience rather than a feature of the app everywhere: a phone's Maps app shares short links, and a phone cannot paste without a field to paste into, so a phone is never told the gesture exists. See ADR-0015.
-_Avoid_: Import, lookup, search (all suggest the app asks someone something; it asks no one anything)
+_Avoid_: Lookup, search (both suggest the app asks someone something; it asks no one anything); Import (that word now names a different thing — see Import — and a Map Link is one link the Owner is standing over, not a list being applied)
 
 **Default Area**:
 The part of the world a subreddit's Maps open on when they have no Pins to frame, held for the whole install, one per subreddit. It is a rectangle rather than a place and a zoom: each Map solves for the zoom that fits the rectangle in the space it has, so one setting frames the same area in a Preview and full screen alike. A moderator sets it by framing it — they open any Map Post full screen, pan and zoom until the Map is showing what they mean, and take that view; the rectangle stored is what was on the screen. There is nothing to name and nothing to search, which is why there is no menu item for it and no way for the app to disagree with the moderator about which Springfield they meant. It is read live rather than copied into a Map Post as it is made, so correcting it corrects every empty Map at once, and where none is set a Map opens on the whole world, as every Map used to. See ADR-0014.
 _Avoid_: Home view, default zoom (both name a camera, and what is stored is an area); bounding box, viewport (the mechanism, not the setting)
 
 **Category**:
-A label an Owner assigns to a Pin, drawn from that Map's own accumulating set of categories rather than a fixed predefined list — typing a new name creates it, typing an existing one reuses it. A Pin has exactly one Category (never zero-to-many), which is what makes sorting and filtering a Map by Category well-defined. The set of categories isn't a separately managed entity — it's just the distinct Category values currently in use across the Map's Pins.
+A label an Owner assigns to a Pin, drawn from that Map's own accumulating set of categories rather than a fixed predefined list — typing a new name creates it, typing an existing one reuses it. A Pin has exactly one Category (never zero-to-many), which is what makes sorting and filtering a Map by Category well-defined. The set of categories isn't a separately managed entity — it's just the distinct Category values currently in use across the Map's Pins. It carries a Category Colour, which nobody chooses and nothing stores.
+
+**Category Colour**:
+The colour a Category's Pins are marked in, worn by their markers on the Map and by a dot beside every place the Sidebar names that Category — which is what makes the Sidebar the Map's legend, since the Map has no other. It is derived rather than chosen: a Category's name asks for a colour, and where an *older* Category already holds that one it takes the next free colour instead. Only an older Category can ever displace a younger one, so a Category that is already on a Map keeps its colour when another is added — the one thing that had to be true for a colour to be worth reading. A Pin with no Category is neutral grey, which is the absence of a Category rather than another one. There are seven colours because seven is how many a reader can actually tell apart on a map, and an eighth Category shares rather than being invented a hue; the names on the markers and in the Sidebar are what carry a Category, and the colour only makes it faster. See ADR-0018.
+_Avoid_: Palette (that is the seven colours, not what a Category has); colour picker, custom colour (nothing is chosen — offering the choice would make the category set a thing to manage)
+
+**Export**:
+Every Pin on a Map written out as JSON text, produced by its Owner from the toolbar and read back by an Import. It describes Pins rather than naming them: a Pin's id is left out, because an id belongs to the Map holding the Pin and not to the Pin's account of itself. Each Location is a pair of numbers, and there is deliberately no field an Export could put a Map Link in — the format cannot express "resolve these", which is what keeps ADR-0015's rule true of a feature that takes a list. It is text in a field rather than a downloaded file: a web view is a sandboxed frame that may refuse a download outright, and there is nothing to refuse about a textarea. See ADR-0017.
+_Avoid_: Backup (it is one use of an Export, not what an Export is); file, download (there is no file)
+
+**Import**:
+Adding Pins to a Map from an Export pasted into it. It only ever adds: what is already on the Map is untouched, which is why it asks for no confirmation and why Delete Map remains the one thing in the app that cannot be undone. It is all-or-nothing — one unreadable entry adds none of them, so a corrected Export can be pasted again without duplicating whatever a partial run had already applied. An imported Pin is indistinguishable from a dropped one afterwards: fresh id, draggable, no record of where it came from. The one thing an Import cannot carry is a picture this app did not upload, which is dropped while its Pin is kept. See ADR-0017.
+_Avoid_: Restore, sync, merge (all imply the Map is being made to match the text; it is only being added to); bulk add (names the volume, not the act)
 
 **Sidebar**:
 A collapsible panel alongside the Map, listing every Pin the Map currently shows. It is the only place a Pin's details are read — there is no per-Pin detail popup — and it is available to Owners and Viewers alike.
 _Avoid_: Drawer, panel (positional descriptions that stop being true if it ever docks elsewhere)
 
 **Pin Card**:
-One Pin's entry in the Sidebar, showing that Pin's full details. Pin Cards are grouped by Category, with uncategorized Pins last. An Owner's Pin Card also offers editing; a Viewer's does not.
+One Pin's entry in the Sidebar, showing that Pin's full details. Pin Cards are grouped by Category, with uncategorized Pins last, and both the group's heading and the card's own Category chip carry that Category Colour. An Owner's Pin Card also offers editing; a Viewer's does not.
 _Avoid_: Row, list item, entry
 
 **Selected Pin**:
