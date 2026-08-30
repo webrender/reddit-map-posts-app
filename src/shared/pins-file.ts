@@ -146,7 +146,17 @@ export function isRedditMediaUrl(url: string): boolean {
   )
 }
 
-/** A Pin as an Export describes it, dropping the id the Map gave it. */
+/**
+ * A Pin as an Export describes it, dropping the id the Map gave it. Built
+ * from an allowlist rather than a spread, so `authorId` and `author` — a
+ * Contributor's identity on a Collaborative Map — cannot leak into an Export
+ * merely because `Pin` grew the fields; leaving them off is a decision, not
+ * an oversight left for the next field `Pin` gains. The consequence is
+ * accepted rather than guarded against: an Owner who exports a Collaborative
+ * Map and imports it into a Solo one launders every Pin's attribution to
+ * themselves, since `toPin` in `server.ts` always stamps an imported Pin to
+ * whoever is running the Import.
+ */
 function toPinExport(pin: Pin): PinExport {
   const out: PinExport = {title: pin.title, location: pin.location}
   if (pin.category) out.category = pin.category

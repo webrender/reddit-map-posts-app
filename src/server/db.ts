@@ -1,34 +1,87 @@
 import {redis, type TxClientLike} from '@devvit/web/server'
 import type {T2, T3} from '@devvit/web/shared'
-import {type MapBounds, type Pin, parseMapBounds} from '../shared/api.ts'
+import {
+  type MapBounds,
+  MapKind,
+  type Pin,
+  parseMapBounds,
+} from '../shared/api.ts'
 import {HttpError} from './http-error.ts'
 
-export type MapData = {ownerId: T2; pins: Pin[]}
+export type MapData = {
+  ownerId: T2
+  /**
+   * Denormalized from {@link IndexMeta.author} at creation, the same way that
+   * field itself is: never refreshed if the account is renamed, and empty for
+   * a Map whose index-meta row is gone (unlisted, or from before this field
+   * existed).
+   */
+  ownerName: string
+  collaborative: boolean
+  pins: Pin[]
+}
 
 /**
- * Owner id and pins are stored separately, with each pin as its own hash
- * field, so concurrent add/delete of different pins can't clobber each
+ * Owner id, kind and pins are stored separately, with each pin as its own
+ * hash field, so concurrent add/delete of different pins can't clobber each
  * other the way a single read-modify-write of one JSON blob would.
  */
 export async function dbGetMap(t3: T3): Promise<MapData | undefined> {
-  const ownerId = await redis.get(ownerKey(t3))
+  const [ownerId, kind, metaJson, pinsHash] = await Promise.all([
+    redis.get(ownerKey(t3)),
+    redis.get(kindKey(t3)),
+    redis.hGet(INDEX_META_KEY, t3),
+    redis.hGetAll(pinsKey(t3)),
+  ])
   if (!ownerId) return undefined
-  const pinsHash = await redis.hGetAll(pinsKey(t3))
   const pins = Object.values(pinsHash).map(json => JSON.parse(json) as Pin)
-  return {ownerId: ownerId as T2, pins}
+  const ownerName = metaJson ? (JSON.parse(metaJson) as IndexMeta).author : ''
+  return {
+    ownerId: ownerId as T2,
+    ownerName,
+    collaborative: kind === MapKind.Collaborative,
+    pins,
+  }
+}
+
+/**
+ * Just enough to authorize a Pin mutation: the Owner and whether the Map is
+ * Collaborative, in one round trip that never touches the Pins hash. Every
+ * Pin mutation used to authorize through {@link dbGetMap}, which `hGetAll`s
+ * every Pin on the Map for a guard that never looks at one — cheap with one
+ * writer, paid on every write once a Map can have many.
+ */
+export async function dbGetMapMeta(
+  t3: T3,
+): Promise<{ownerId: T2; collaborative: boolean} | undefined> {
+  const [ownerId, kind] = await Promise.all([
+    redis.get(ownerKey(t3)),
+    redis.get(kindKey(t3)),
+  ])
+  if (!ownerId) return undefined
+  return {ownerId: ownerId as T2, collaborative: kind === MapKind.Collaborative}
 }
 
 export async function dbCreateMap(
   t3: T3,
   ownerId: T2,
   meta: IndexMeta,
+  collaborative: boolean,
 ): Promise<MapData> {
   await atomically(async tx => {
     await tx.set(ownerKey(t3), ownerId)
+    // Absent means Solo — see the warning on `dbIsMap` — so the key is only
+    // ever written for the other kind, and only ever this one canonical
+    // value. Written inside the same transaction as the owner key: split
+    // across two writes, a crash between them could leave a Map permanently
+    // the wrong kind, with no conversion to fix it.
+    if (collaborative) await tx.set(kindKey(t3), MapKind.Collaborative)
     await tx.zAdd(INDEX_KEY, {member: t3, score: meta.createdAt})
-    await tx.hSet(INDEX_META_KEY, {[t3]: JSON.stringify(meta)})
+    await tx.hSet(INDEX_META_KEY, {
+      [t3]: JSON.stringify({...meta, collaborative}),
+    })
   })
-  return {ownerId, pins: []}
+  return {ownerId, ownerName: meta.author, collaborative, pins: []}
 }
 
 /**
@@ -63,6 +116,16 @@ export async function dbAddPin(t3: T3, pin: Pin): Promise<void> {
 }
 
 /**
+ * One Pin, without reading any of the others — what authorizing an edit on a
+ * Collaborative Map needs, and all it needs: `canEditPin` asks about this one
+ * Pin's `authorId`, not the rest of the hash.
+ */
+export async function dbGetPin(t3: T3, id: string): Promise<Pin | undefined> {
+  const json = await redis.hGet(pinsKey(t3), id)
+  return json ? (JSON.parse(json) as Pin) : undefined
+}
+
+/**
  * Adds any number of Pins in one transaction — one Pin from a Pin Drop, or a
  * whole Export from an Import. Every `pin.id` is a fresh `crypto.randomUUID()`
  * from the caller, so every field below is new and the count always wants the
@@ -84,6 +147,19 @@ export async function dbAddPins(t3: T3, pins: readonly Pin[]): Promise<void> {
   })
 }
 
+/**
+ * A whole-object read-modify-write, and deliberately last-write-wins: two
+ * editors racing on the same Pin — an author and a Moderator, now that a
+ * Collaborative Map can have both — is a real possibility this does not
+ * guard against, and one of their edits can silently vanish under the
+ * other's. Locking it (as {@link dbDeletePin} briefly did, for a narrower
+ * problem) would trade that for the granularity failure below: WATCHing the
+ * whole Pins hash means any other Contributor's unrelated add or edit on the
+ * *same Map* invalidates it too. This Map is stale-until-reload everywhere
+ * else (see ADR-0019), so a lost concurrent edit is accepted the same way;
+ * the case that actually matters — the Pin having been deleted out from
+ * under an editor — is already loud, via the 404 below, rather than silent.
+ */
 export async function dbUpdatePin(
   t3: T3,
   id: string,
@@ -100,33 +176,38 @@ export async function dbUpdatePin(
 /**
  * Unlike {@link dbAddPin}'s field, `id` is client-chosen and may already be
  * gone — from a second click, a retry, or someone else's request — so whether
- * to decrement is a real decision, not a given. It is made by reading the
- * field just before writing, inside a transaction WATCHing the hash: if
- * another write to this Map's Pins lands in between, that read may now be
- * stale, so the whole read-decide-write cycle is discarded and run again
- * rather than risking a decrement for a Pin someone else already removed (or
- * skipping one for a Pin that is still there).
+ * to decrement is a real decision, not a given. `hDel`'s own return count
+ * makes that decision atomically: exactly one caller, of however many ask to
+ * delete the same `id` at once, gets `1` back, and the rest get `0` and skip
+ * the decrement. That needs no WATCH, and used to have one anyway — on the
+ * *whole* Pins hash, to protect a single integer, so any other Contributor's
+ * unrelated add or edit on the same Map invalidated it and forced a retry.
+ * With two writers now routine on a Collaborative Map rather than
+ * unreachable, that granularity mismatch stopped being theoretical.
  */
 export async function dbDeletePin(t3: T3, id: string): Promise<void> {
   await requireOwnerExists(t3)
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const existed = !!(await redis.hGet(pinsKey(t3), id))
-    if (!existed) return
-    const tx = await redis.watch(pinsKey(t3))
-    await tx.multi()
-    await tx.hDel(pinsKey(t3), [id])
-    await tx.zIncrBy(INDEX_PINS_KEY, t3, -1)
-    if ((await tx.exec()).length) return
-  }
-  throw new HttpError(409, 'too much contention deleting this pin, try again')
+  const removed = await redis.hDel(pinsKey(t3), [id])
+  if (removed) await redis.zIncrBy(INDEX_PINS_KEY, t3, -removed)
 }
 
 /**
  * What an Entry renders that Reddit isn't asked for. The title is safe to copy
  * because Reddit won't let anyone edit a post title; the score is deliberately
  * not here, since it changes constantly and lives in its own cache.
+ *
+ * `collaborative` is written once, at creation, and is optional only so that
+ * an `index-meta` row from before this field existed still parses — read as
+ * `undefined`, which {@link dbGetIndex} treats the same as `false`. It exists
+ * so the Listing's scan never has to read a per-post `kind:` key to know
+ * whether an Entry needs its `community` marker.
  */
-export type IndexMeta = {title: string; author: string; createdAt: number}
+export type IndexMeta = {
+  title: string
+  author: string
+  createdAt: number
+  collaborative?: boolean
+}
 
 /** An indexed Map Post, before Reddit has been asked anything about it. */
 export type IndexRow = IndexMeta & {t3: T3; pinCount: number; score: number}
@@ -152,12 +233,13 @@ export async function dbGetIndex(): Promise<IndexRow[]> {
   for (const {member, score: createdAt} of created) {
     const json = meta[member]
     if (!json) continue
-    const {title, author} = JSON.parse(json) as IndexMeta
+    const {title, author, collaborative} = JSON.parse(json) as IndexMeta
     rows.push({
       t3: member as T3,
       title,
       author,
       createdAt,
+      collaborative,
       pinCount: pinCountByT3.get(member) ?? 0,
       score: scoreByT3.get(member) ?? 0,
     })
@@ -167,9 +249,10 @@ export async function dbGetIndex(): Promise<IndexRow[]> {
 
 /**
  * Drops a Map Post from the index because its Reddit post is gone. The Map
- * itself is left alone — the owner key and the Pins stay where they are. A
- * deletion we misread costs a listing; a deletion we act on by erasing someone's
- * Pins costs their Map, and only one of those is recoverable.
+ * itself is left alone — the owner key, the kind, and the Pins stay where
+ * they are. A deletion we misread costs a listing; a deletion we act on by
+ * erasing someone's Pins costs their Map, and only one of those is
+ * recoverable.
  */
 export async function dbUnlistMap(t3: T3): Promise<void> {
   await Promise.all([
@@ -203,13 +286,17 @@ export async function dbClearIndexMiss(t3: T3): Promise<void> {
 
 /**
  * Forgets a Map entirely, at its Owner's request: the index entries, the owner
- * key, and every Pin. Unlike {@link dbUnlistMap} this is not a guess about what
- * Reddit did — the Owner asked for it and the Post is going with it, so there
- * is nothing left for the Pins to belong to.
+ * key, the kind, and every Pin. Unlike {@link dbUnlistMap} this is not a guess
+ * about what Reddit did — the Owner asked for it and the Post is going with
+ * it, so there is nothing left for the Pins, or the kind, to belong to.
  */
 export async function dbDeleteMap(t3: T3): Promise<void> {
   await dbUnlistMap(t3)
-  await Promise.all([redis.del(ownerKey(t3)), redis.del(pinsKey(t3))])
+  await Promise.all([
+    redis.del(ownerKey(t3)),
+    redis.del(pinsKey(t3)),
+    redis.del(kindKey(t3)),
+  ])
 }
 
 /** Writes the cached upvote counts the Top Sort orders by. */
@@ -284,6 +371,17 @@ function ownerKey(t3: T3): string {
 
 function pinsKey(t3: T3): string {
   return `pins:${t3}`
+}
+
+/**
+ * Holds {@link MapKind.Collaborative} for a Collaborative Map, and is absent
+ * for a Solo one — never `'solo'` itself. It cannot live on `owner:{t3}`,
+ * whose mere existence is the only thing telling a Map Post apart from an
+ * Index Post at the Reddit API level; overloading it a second way would let
+ * an empty value there be misread as "no owner" by {@link dbIsMap}.
+ */
+function kindKey(t3: T3): string {
+  return `kind:${t3}`
 }
 
 async function requireOwnerExists(t3: T3): Promise<void> {

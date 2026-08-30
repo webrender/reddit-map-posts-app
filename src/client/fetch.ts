@@ -16,7 +16,7 @@ import {
   type UpdatePinReq,
   type UpdatePinRsp,
 } from '../shared/api.ts'
-import {fetchJson} from './json.ts'
+import {type FetchResult, fetchJson, fetchJsonResult} from './json.ts'
 
 /**
  * `full` is the reading asking, and it decides whether the server spends a
@@ -47,6 +47,25 @@ export async function fetchDeletePin(
   req: DeletePinReq,
 ): Promise<DeletePinRsp | undefined> {
   return fetchJson(Endpoint.DeletePin, req)
+}
+
+/**
+ * The result-carrying sibling of {@link fetchUpdatePin}, for the one caller —
+ * `savePin` — that has to tell a 404 (the Pin was deleted out from under this
+ * editor) and a 403 (a Moderator or the author revoked this reader's standing
+ * mid-edit) apart from an ordinary failure.
+ */
+export async function fetchUpdatePinResult(
+  req: UpdatePinReq,
+): Promise<FetchResult<UpdatePinRsp>> {
+  return fetchJsonResult(Endpoint.UpdatePin, req)
+}
+
+/** The result-carrying sibling of {@link fetchDeletePin} — see the above. */
+export async function fetchDeletePinResult(
+  req: DeletePinReq,
+): Promise<FetchResult<DeletePinRsp>> {
+  return fetchJsonResult(Endpoint.DeletePin, req)
 }
 
 /**

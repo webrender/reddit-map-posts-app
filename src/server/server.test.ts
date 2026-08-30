@@ -27,6 +27,7 @@ import {
   type ImportPinsRsp,
   IndexPageSize,
   type IndexPostFormReq,
+  MapKind,
   NewPostFormName,
   type NewPostFormReq,
   type Pin,
@@ -40,6 +41,12 @@ import type {MapData} from './db.ts'
 import {onReq} from './server.ts'
 
 const OWNER = 't2_owner' as T2
+/** A Contributor on a Collaborative Map — never the Owner, never a Moderator. */
+const CONTRIBUTOR = 't2_contributor' as T2
+/** A second Contributor, for "someone else's Pin" tests. */
+const OTHER_CONTRIBUTOR = 't2_other_contributor' as T2
+/** A Moderator who is not the Owner. */
+const MODERATOR = 't2_moderator' as T2
 const POST = 't3_123' as T3
 /** Mirrors the install-scoped key `db.ts` writes the Default Area under. */
 const AREA_KEY = 'default-area'
@@ -66,7 +73,28 @@ const mediaUpload = media.upload.bind(media)
 const submitCustomPost = reddit.submitCustomPost.bind(reddit)
 const getModerators = reddit.getModerators.bind(reddit)
 const originalFetch = globalThis.fetch
-let requestUserId: T2 = OWNER
+/** `undefined` stands for a logged-out reader — a real, testable state now that ADR-0019's fallback closes a hole on exactly that case. */
+let requestUserId: T2 | undefined = OWNER
+
+/**
+ * Derives a username from a userId. `OWNER` keeps its pre-existing username,
+ * since a long list of tests already assert against it by that name; every
+ * other `T2` strips its `t2_` prefix, giving every distinct test user a
+ * distinct, readable username for free.
+ */
+function usernameForId(userId: T2): string {
+  return userId === OWNER ? 'username' : userId.replace(/^t2_/, '')
+}
+
+/**
+ * The same, for `context.username` in the harness — which actually tracks
+ * `requestUserId` now instead of the whole app running as one constant
+ * `'username'` no matter who is asking. `undefined` stays `undefined`, same
+ * as a logged-out `context.username` really is.
+ */
+function usernameFor(userId: T2 | undefined): string | undefined {
+  return userId ? usernameForId(userId) : undefined
+}
 let submittedPostTitle: string | undefined
 /** Which `post.entrypoints` key the last submitted post asked to render. */
 let submittedPostEntry: string | undefined
@@ -219,6 +247,7 @@ before(async () => {
     username?: string
   }) => ({
     all: async () => {
+      moderatorReadCount++
       if (moderatorsUnreadable) throw Error('reddit is down')
       return moderators
         .filter(
@@ -268,7 +297,7 @@ before(async () => {
         postId: POST,
         subredditName: 'test_sub',
         userId: requestUserId,
-        username: 'username',
+        username: usernameFor(requestUserId),
       } as unknown as Context,
       () => onReq(req, rsp),
     )
@@ -318,6 +347,7 @@ beforeEach(() => {
   upstreamReqs = []
   moderators = []
   moderatorsUnreadable = false
+  moderatorReadCount = 0
 })
 
 /** What Reddit will say about a post id, for the reads an Index Post makes. */
@@ -331,10 +361,17 @@ let deletedPosts: T3[] = []
 let moderators: {username: string; subredditName: string}[] = []
 /** When set, every moderator read throws, standing for an unreachable Reddit. */
 let moderatorsUnreadable = false
+/**
+ * How many times `reddit.getModerators(...).all()` has actually been
+ * awaited — the Reddit round trip `requireCollabPinAccess` is supposed to
+ * defer until the fast path (a Contributor editing their own Pin, or a Solo
+ * Owner) has already said no. See ADR-0019.
+ */
+let moderatorReadCount = 0
 
-/** Makes the user each request is made as a moderator of this subreddit. */
-function seedModerator(): void {
-  moderators.push({username: 'username', subredditName: 'test_sub'})
+/** Makes the given user (the request's, by default) a moderator of this subreddit. */
+function seedModerator(userId: T2 = OWNER): void {
+  moderators.push({username: usernameForId(userId), subredditName: 'test_sub'})
 }
 
 /** Gives the subreddit a Default Area, as a moderator's framing would leave one. */
@@ -366,6 +403,8 @@ function seedIndexed(
     pins?: number
     /** The cached upvote count the Top Sort orders by. */
     score?: number
+    /** Left out entirely by default — a row from before this field existed. */
+    collaborative?: boolean
   },
 ): void {
   redisSet_('index').set(t3, opts.createdAt)
@@ -382,6 +421,9 @@ function seedIndexed(
       title: opts.title,
       author: opts.author,
       createdAt: opts.createdAt,
+      ...(opts.collaborative === undefined
+        ? {}
+        : {collaborative: opts.collaborative}),
     }),
   )
 }
@@ -418,11 +460,40 @@ function getIndex(params?: {
   return fetch(`${serverURL}/${Endpoint.GetIndex}?${search}`)
 }
 
-function seedMap(map: MapData): void {
+/**
+ * A Map on {@link POST}, as `dbCreateMap` and the Pin routes would leave it.
+ * `collaborative` and `ownerName` are optional so the many Solo-Map tests
+ * that predate them need no changes; `ownerName`, when given, is written into
+ * `index-meta` the way `dbGetMap` actually reads it back — denormalized
+ * there at creation, not on a key of its own.
+ */
+function seedMap(
+  map: Pick<MapData, 'ownerId' | 'pins'> &
+    Partial<Pick<MapData, 'collaborative' | 'ownerName'>>,
+): void {
   redisValues.set(`owner:${POST}`, map.ownerId)
   const hash = new Map<string, string>()
   for (const pin of map.pins) hash.set(pin.id, JSON.stringify(pin))
   redisHashes.set(`pins:${POST}`, hash)
+  if (map.collaborative) redisValues.set(`kind:${POST}`, 'collaborative')
+  if (map.ownerName !== undefined) {
+    let meta = redisHashes.get('index-meta')
+    if (!meta) {
+      meta = new Map()
+      redisHashes.set('index-meta', meta)
+    }
+    meta.set(
+      POST,
+      JSON.stringify({title: '', author: map.ownerName, createdAt: 0}),
+    )
+  }
+}
+
+/** A Collaborative Map on {@link POST} — see {@link seedMap}. */
+function seedCollabMap(
+  map: Pick<MapData, 'ownerId' | 'pins'> & Partial<Pick<MapData, 'ownerName'>>,
+): void {
+  seedMap({...map, collaborative: true})
 }
 
 function postJson(endpoint: Endpoint, body: unknown): Promise<Response> {
@@ -452,8 +523,10 @@ test('get map: owner viewing their own map', async () => {
   assert.equal(rsp.status, 200)
   assert.deepEqual<GetMapRsp>(await rsp.json(), {
     ownerId: OWNER,
+    ownerName: '',
     pins: [{id: 'p1', location: {lat: 1, lng: 2}, title: 'Cafe'}],
     isOwner: true,
+    collaborative: false,
     isModerator: false,
   })
 })
@@ -530,6 +603,27 @@ test('add pin: a non-owner is forbidden', async () => {
   assert.equal(rsp.status, 403)
   const body = (await rsp.json()) as ErrorRsp
   assert.equal(body.error, 'not authorized')
+})
+
+test('add pin: a moderator who is not the Owner is forbidden on a Solo Map', async () => {
+  // The collaborative rule — a Moderator may add/edit/delete any Pin — must
+  // not leak onto a Solo Map, where moderating grants nothing. See ADR-0019.
+  seedMap({ownerId: OWNER, pins: []})
+  requestUserId = MODERATOR
+  seedModerator(MODERATOR)
+
+  const req: AddPinReq = {location: {lat: 10, lng: 20}, title: 'Coffee Shop'}
+  const rsp = await postJson(Endpoint.AddPin, req)
+  assert.equal(rsp.status, 403)
+})
+
+test('add pin: logged out is forbidden', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+  requestUserId = undefined
+
+  const req: AddPinReq = {location: {lat: 10, lng: 20}, title: 'Coffee Shop'}
+  const rsp = await postJson(Endpoint.AddPin, req)
+  assert.equal(rsp.status, 403)
 })
 
 test('add pin: 404 when the post has no map yet', async () => {
@@ -634,6 +728,31 @@ test('update pin: a non-owner is forbidden', async () => {
   assert.equal(rsp.status, 403)
 })
 
+test('update pin: a moderator who is not the Owner is forbidden on a Solo Map', async () => {
+  seedMap({
+    ownerId: OWNER,
+    pins: [{id: 'p1', location: {lat: 1, lng: 2}, title: 'Cafe'}],
+  })
+  requestUserId = MODERATOR
+  seedModerator(MODERATOR)
+
+  const req: UpdatePinReq = {id: 'p1', title: 'Hijacked'}
+  const rsp = await postJson(Endpoint.UpdatePin, req)
+  assert.equal(rsp.status, 403)
+})
+
+test('update pin: logged out is forbidden', async () => {
+  seedMap({
+    ownerId: OWNER,
+    pins: [{id: 'p1', location: {lat: 1, lng: 2}, title: 'Cafe'}],
+  })
+  requestUserId = undefined
+
+  const req: UpdatePinReq = {id: 'p1', title: 'Hijacked'}
+  const rsp = await postJson(Endpoint.UpdatePin, req)
+  assert.equal(rsp.status, 403)
+})
+
 test('update pin: 404 when the pin id does not exist', async () => {
   seedMap({ownerId: OWNER, pins: []})
 
@@ -680,6 +799,31 @@ test('delete pin: a non-owner is forbidden', async () => {
   assert.equal(map.pins.length, 1)
 })
 
+test('delete pin: a moderator who is not the Owner is forbidden on a Solo Map', async () => {
+  seedMap({
+    ownerId: OWNER,
+    pins: [{id: 'p1', location: {lat: 1, lng: 2}, title: 'Cafe'}],
+  })
+  requestUserId = MODERATOR
+  seedModerator(MODERATOR)
+
+  const req: DeletePinReq = {id: 'p1'}
+  const rsp = await postJson(Endpoint.DeletePin, req)
+  assert.equal(rsp.status, 403)
+})
+
+test('delete pin: logged out is forbidden', async () => {
+  seedMap({
+    ownerId: OWNER,
+    pins: [{id: 'p1', location: {lat: 1, lng: 2}, title: 'Cafe'}],
+  })
+  requestUserId = undefined
+
+  const req: DeletePinReq = {id: 'p1'}
+  const rsp = await postJson(Endpoint.DeletePin, req)
+  assert.equal(rsp.status, 403)
+})
+
 /** The pins currently on {@link POST}, straight out of the fake Redis. */
 function storedPins(): Pin[] {
   const hash = redisHashes.get(`pins:${POST}`) ?? new Map()
@@ -690,6 +834,26 @@ function storedPins(): Pin[] {
 function storedPinCount(): number | undefined {
   return redisSets.get('index-pins')?.get(POST)
 }
+
+test('delete pin: two deletes of the same pin leave the cached count down by exactly one', async () => {
+  // The concurrency `dbDeletePin` used to get wrong: two writers — an author
+  // and a Moderator, now that both can hit Delete on the same card — racing
+  // to delete one Pin used to double-decrement `index-pins`. `hDel`'s own
+  // return count fixes it, and needs no concurrency mock to prove: called
+  // twice in sequence, exactly one of the two calls actually removes anything.
+  seedMap({
+    ownerId: OWNER,
+    pins: [{id: 'p1', location: {lat: 1, lng: 2}, title: 'Cafe'}],
+  })
+  redisSet_('index-pins').set(POST, 1)
+
+  const req: DeletePinReq = {id: 'p1'}
+  const first = await postJson(Endpoint.DeletePin, req)
+  const second = await postJson(Endpoint.DeletePin, req)
+  assert.equal(first.status, 200)
+  assert.equal(second.status, 200)
+  assert.equal(storedPinCount(), 0)
+})
 
 test('import pins: owner adds a whole export at once', async () => {
   seedMap({
@@ -849,6 +1013,20 @@ test('import pins: a non-owner is forbidden', async () => {
   assert.equal(storedPins().length, 0)
 })
 
+test('import pins: a moderator who is not the Owner is forbidden, even on a Collaborative Map', async () => {
+  // Import is a 500-Pin bulk add — a flooding vector this app keeps
+  // Owner-only regardless of who else may touch individual Pins.
+  seedCollabMap({ownerId: OWNER, pins: []})
+  requestUserId = MODERATOR
+  seedModerator(MODERATOR)
+
+  const rsp = await postJson(Endpoint.ImportPins, {
+    pins: [{title: 'A', location: {lat: 1, lng: 2}}],
+  })
+  assert.equal(rsp.status, 403)
+  assert.equal(storedPins().length, 0)
+})
+
 test('import pins: 404 when the post has no map', async () => {
   const rsp = await postJson(Endpoint.ImportPins, {
     pins: [{title: 'A', location: {lat: 1, lng: 2}}],
@@ -873,6 +1051,340 @@ test('import pins: a location given as a maps link is refused, not resolved', as
   assert.equal(storedPins().length, 0)
   // And nothing was fetched to find out where that link goes.
   assert.deepEqual(upstreamReqs, [])
+})
+
+// --- Collaborative Maps -----------------------------------------------
+//
+// See ADR-0019. Where a Solo-Map test above already covers a rule that also
+// holds here (a bad title, a bad location, 404s that don't depend on who is
+// asking), it is not repeated — this section is about what is *different*:
+// who may touch a Pin, and what a Pin remembers about who added it.
+
+test('collaborative add pin: the Owner adds a pin', async () => {
+  seedCollabMap({ownerId: OWNER, pins: []})
+
+  const req: AddPinReq = {location: {lat: 10, lng: 20}, title: 'Cafe'}
+  const rsp = await postJson(Endpoint.AddPin, req)
+  assert.equal(rsp.status, 200)
+  const body = (await rsp.json()) as AddPinRsp
+  assert.equal(body.pin.authorId, OWNER)
+  assert.equal(body.pin.author, 'username')
+})
+
+test('collaborative add pin: any logged-in member adds a pin, stamped as its Contributor', async () => {
+  seedCollabMap({ownerId: OWNER, pins: []})
+  requestUserId = CONTRIBUTOR
+
+  const req: AddPinReq = {location: {lat: 10, lng: 20}, title: 'Cafe'}
+  const rsp = await postJson(Endpoint.AddPin, req)
+  assert.equal(rsp.status, 200)
+  const body = (await rsp.json()) as AddPinRsp
+  assert.equal(body.pin.authorId, CONTRIBUTOR)
+  assert.equal(body.pin.author, 'contributor')
+  assert.equal(storedPins()[0]?.authorId, CONTRIBUTOR)
+})
+
+test('collaborative add pin: a Moderator adds a pin like any other member', async () => {
+  seedCollabMap({ownerId: OWNER, pins: []})
+  requestUserId = MODERATOR
+  seedModerator(MODERATOR)
+
+  const req: AddPinReq = {location: {lat: 10, lng: 20}, title: 'Cafe'}
+  const rsp = await postJson(Endpoint.AddPin, req)
+  assert.equal(rsp.status, 200)
+})
+
+test('collaborative add pin: logged out is forbidden, and nothing is written', async () => {
+  seedCollabMap({ownerId: OWNER, pins: []})
+  requestUserId = undefined
+
+  const req: AddPinReq = {location: {lat: 10, lng: 20}, title: 'Cafe'}
+  const rsp = await postJson(Endpoint.AddPin, req)
+  assert.equal(rsp.status, 403)
+  assert.equal(storedPins().length, 0)
+})
+
+test('collaborative update/delete pin: the author may edit and delete their own Pin', async () => {
+  seedCollabMap({
+    ownerId: OWNER,
+    pins: [
+      {
+        id: 'p1',
+        location: {lat: 1, lng: 2},
+        title: 'Cafe',
+        authorId: CONTRIBUTOR,
+        author: 'contributor',
+      },
+    ],
+  })
+  requestUserId = CONTRIBUTOR
+
+  const updateRsp = await postJson(Endpoint.UpdatePin, {
+    id: 'p1',
+    title: 'Renamed',
+  } satisfies UpdatePinReq)
+  assert.equal(updateRsp.status, 200)
+
+  const deleteRsp = await postJson(Endpoint.DeletePin, {
+    id: 'p1',
+  } satisfies DeletePinReq)
+  assert.equal(deleteRsp.status, 200)
+  assert.equal(storedPins().length, 0)
+})
+
+test('collaborative update/delete pin: a non-mod member may not touch someone else s Pin', async () => {
+  seedCollabMap({
+    ownerId: OWNER,
+    pins: [
+      {
+        id: 'p1',
+        location: {lat: 1, lng: 2},
+        title: 'Cafe',
+        authorId: CONTRIBUTOR,
+        author: 'contributor',
+      },
+    ],
+  })
+  requestUserId = OTHER_CONTRIBUTOR
+
+  const updateRsp = await postJson(Endpoint.UpdatePin, {
+    id: 'p1',
+    title: 'Hijacked',
+  } satisfies UpdatePinReq)
+  assert.equal(updateRsp.status, 403)
+  assert.equal(storedPins()[0]?.title, 'Cafe')
+
+  const deleteRsp = await postJson(Endpoint.DeletePin, {
+    id: 'p1',
+  } satisfies DeletePinReq)
+  assert.equal(deleteRsp.status, 403)
+  assert.equal(storedPins().length, 1)
+})
+
+test('collaborative update/delete pin: a Moderator may touch someone else s Pin', async () => {
+  seedCollabMap({
+    ownerId: OWNER,
+    pins: [
+      {
+        id: 'p1',
+        location: {lat: 1, lng: 2},
+        title: 'Cafe',
+        authorId: CONTRIBUTOR,
+        author: 'contributor',
+      },
+    ],
+  })
+  requestUserId = MODERATOR
+  seedModerator(MODERATOR)
+
+  const updateRsp = await postJson(Endpoint.UpdatePin, {
+    id: 'p1',
+    title: 'Moderated',
+  } satisfies UpdatePinReq)
+  assert.equal(updateRsp.status, 200)
+  assert.equal(storedPins()[0]?.title, 'Moderated')
+
+  const deleteRsp = await postJson(Endpoint.DeletePin, {
+    id: 'p1',
+  } satisfies DeletePinReq)
+  assert.equal(deleteRsp.status, 200)
+  assert.equal(storedPins().length, 0)
+})
+
+test('collaborative update/delete pin: the Owner gets no special power over a Contributor s Pin', async () => {
+  // The rule most likely to be got wrong: ownership is of the Post, not of
+  // other people's work.
+  seedCollabMap({
+    ownerId: OWNER,
+    pins: [
+      {
+        id: 'p1',
+        location: {lat: 1, lng: 2},
+        title: 'Cafe',
+        authorId: CONTRIBUTOR,
+        author: 'contributor',
+      },
+    ],
+  })
+
+  const updateRsp = await postJson(Endpoint.UpdatePin, {
+    id: 'p1',
+    title: 'Hijacked',
+  } satisfies UpdatePinReq)
+  assert.equal(updateRsp.status, 403)
+  assert.equal(storedPins()[0]?.title, 'Cafe')
+
+  const deleteRsp = await postJson(Endpoint.DeletePin, {
+    id: 'p1',
+  } satisfies DeletePinReq)
+  assert.equal(deleteRsp.status, 403)
+  assert.equal(storedPins().length, 1)
+})
+
+test('collaborative update pin: a legacy Pin with no authorId is the Owner s', async () => {
+  seedCollabMap({
+    ownerId: OWNER,
+    pins: [{id: 'p1', location: {lat: 1, lng: 2}, title: 'Cafe'}],
+  })
+
+  const ownerRsp = await postJson(Endpoint.UpdatePin, {
+    id: 'p1',
+    title: 'By the Owner',
+  } satisfies UpdatePinReq)
+  assert.equal(ownerRsp.status, 200)
+
+  requestUserId = OTHER_CONTRIBUTOR
+  const memberRsp = await postJson(Endpoint.UpdatePin, {
+    id: 'p1',
+    title: 'By a stranger',
+  } satisfies UpdatePinReq)
+  assert.equal(memberRsp.status, 403)
+
+  // The regression test for the `undefined === undefined` hole: a logged-out
+  // reader must not inherit a legacy Pin just because neither side has an id.
+  requestUserId = undefined
+  const loggedOutRsp = await postJson(Endpoint.UpdatePin, {
+    id: 'p1',
+    title: 'By nobody',
+  } satisfies UpdatePinReq)
+  assert.equal(loggedOutRsp.status, 403)
+})
+
+test('collaborative update pin: authorId is not patchable', async () => {
+  seedCollabMap({
+    ownerId: OWNER,
+    pins: [
+      {
+        id: 'p1',
+        location: {lat: 1, lng: 2},
+        title: 'Cafe',
+        authorId: CONTRIBUTOR,
+        author: 'contributor',
+      },
+    ],
+  })
+  requestUserId = CONTRIBUTOR
+
+  // A forged field a real client never sends — UpdatePinReq has no authorId
+  // to type this as, which is the point; this goes in as a raw body.
+  const rsp = await postJson(Endpoint.UpdatePin, {
+    id: 'p1',
+    authorId: OTHER_CONTRIBUTOR,
+  })
+  assert.equal(rsp.status, 200)
+  assert.equal(storedPins()[0]?.authorId, CONTRIBUTOR)
+})
+
+test('collaborative import pins: the Owner adds a whole export, every Pin stamped to themselves', async () => {
+  seedCollabMap({ownerId: OWNER, pins: [], ownerName: 'username'})
+
+  const rsp = await postJson(Endpoint.ImportPins, {
+    pins: [{title: 'A', location: {lat: 1, lng: 2}}],
+  } satisfies ImportPinsReq)
+  assert.equal(rsp.status, 200)
+  assert.equal(storedPins()[0]?.authorId, OWNER)
+  assert.equal(storedPins()[0]?.author, 'username')
+})
+
+test('collaborative delete post: the Owner may delete it; a Contributor may not', async () => {
+  seedCollabMap({
+    ownerId: OWNER,
+    pins: [
+      {
+        id: 'p1',
+        location: {lat: 1, lng: 2},
+        title: 'Cafe',
+        authorId: CONTRIBUTOR,
+        author: 'contributor',
+      },
+    ],
+  })
+  seedIndexed(POST, {title: 'Berlin', author: 'username', createdAt: 1})
+  seedRedditPost(POST)
+  requestUserId = CONTRIBUTOR
+
+  const contributorRsp = await postJson(Endpoint.DeletePost, {})
+  assert.equal(contributorRsp.status, 403)
+  assert.deepEqual(deletedPosts, [])
+
+  requestUserId = OWNER
+  const ownerRsp = await postJson(Endpoint.DeletePost, {})
+  assert.equal(ownerRsp.status, 200)
+  assert.deepEqual(deletedPosts, [POST])
+})
+
+test('collaborative update pin: an unreachable Reddit is not a yes for a Moderator', async () => {
+  seedCollabMap({
+    ownerId: OWNER,
+    pins: [
+      {
+        id: 'p1',
+        location: {lat: 1, lng: 2},
+        title: 'Cafe',
+        authorId: CONTRIBUTOR,
+        author: 'contributor',
+      },
+    ],
+  })
+  requestUserId = MODERATOR
+  seedModerator(MODERATOR)
+  moderatorsUnreadable = true
+
+  const rsp = await postJson(Endpoint.UpdatePin, {
+    id: 'p1',
+    title: 'Hijacked',
+  } satisfies UpdatePinReq)
+  assert.equal(rsp.status, 403)
+})
+
+test('collaborative update pin: a Contributor editing their own Pin makes zero moderator reads', async () => {
+  // The whole point of deferring `isModerator()` — nothing else will notice
+  // if this regresses into a Reddit round trip on every write. See
+  // ADR-0019.
+  seedCollabMap({
+    ownerId: OWNER,
+    pins: [
+      {
+        id: 'p1',
+        location: {lat: 1, lng: 2},
+        title: 'Cafe',
+        authorId: CONTRIBUTOR,
+        author: 'contributor',
+      },
+    ],
+  })
+  requestUserId = CONTRIBUTOR
+
+  assert.equal(
+    (
+      await postJson(Endpoint.UpdatePin, {
+        id: 'p1',
+        title: 'By its own author',
+      } satisfies UpdatePinReq)
+    ).status,
+    200,
+  )
+  assert.equal(moderatorReadCount, 0)
+})
+
+test('update pin: a Solo-Owner edit makes zero moderator reads', async () => {
+  // The other fast path `requireCollabPinAccess` never gets a chance to
+  // matter on: a Solo Map is decided from `dbGetMapMeta` alone.
+  seedMap({
+    ownerId: OWNER,
+    pins: [{id: 'p1', location: {lat: 1, lng: 2}, title: 'Cafe'}],
+  })
+
+  assert.equal(
+    (
+      await postJson(Endpoint.UpdatePin, {
+        id: 'p1',
+        title: 'By the Owner',
+      } satisfies UpdatePinReq)
+    ).status,
+    200,
+  )
+  assert.equal(moderatorReadCount, 0)
 })
 
 test("every form the app shows satisfies Devvit's own field rules", async () => {
@@ -906,6 +1418,29 @@ function assertValidForm(ui: UiResponse, label: string): void {
         'app',
         `${label} field "${name}" is secret without scope "app"`,
       )
+    }
+    // `assertValidFormFields` — Devvit's own runtime check — has no select
+    // rules at all: `options: []` and a `defaultValue` that names no real
+    // option both sail through it. These are the two ways a select can be
+    // wrong that nothing else in the stack catches.
+    if (field.type === 'select') {
+      assert.notEqual(
+        field.options.length,
+        0,
+        `${label} field "${name}" is a select with no options`,
+      )
+      const values = field.options.map(option => option.value)
+      assert.equal(
+        new Set(values).size,
+        values.length,
+        `${label} field "${name}" repeats an option value`,
+      )
+      for (const picked of field.defaultValue ?? []) {
+        assert.ok(
+          values.includes(picked),
+          `${label} field "${name}" defaults to "${picked}", which is not one of its options`,
+        )
+      }
     }
   }
 }
@@ -974,9 +1509,9 @@ test('get map: a preview does not ask, so it is never told', async () => {
 })
 
 test('get map: moderating is not owning', async () => {
-  seedModerator()
   seedMap({ownerId: OWNER, pins: []})
   requestUserId = 't2_viewer' as T2
+  seedModerator(requestUserId)
 
   const rsp = await fetch(`${serverURL}/${Endpoint.GetMap}?full=1`)
   const map = (await rsp.json()) as GetMapRsp
@@ -1082,6 +1617,16 @@ test('new post menu action: shows a title form and creates nothing yet', async (
       required: true,
       // The username the Owner-to-be would have gotten without being asked.
       defaultValue: "username's Map",
+    },
+    {
+      type: 'select',
+      name: 'kind',
+      label: 'Who can add pins?',
+      options: [
+        {label: 'Only me', value: MapKind.Solo},
+        {label: 'Anyone in this community', value: MapKind.Collaborative},
+      ],
+      defaultValue: [MapKind.Solo],
     },
   ])
 
@@ -1772,6 +2317,80 @@ test('create map post: rejects a blank title and one longer than Reddit allows',
   assert.equal(submittedPostTitle, undefined)
 })
 
+// --- Creation / kind -----------------------------------------------------
+
+test('new post form: a Collaborative selection creates a Collaborative Map, shaped as Reddit actually sends a select', async () => {
+  // {kind: ['collaborative']}, not {kind: 'collaborative'} — a Devvit select
+  // submits its choice as an array even for a single pick. See ADR-0019.
+  const rsp = await postJson(Endpoint.OnFormNewPost, {
+    title: 'Community Map',
+    kind: [MapKind.Collaborative],
+  })
+  assert.equal(rsp.status, 200)
+  assert.equal(redisValues.get(`kind:${POST}`), MapKind.Collaborative)
+
+  const getRsp = await fetch(`${serverURL}/${Endpoint.GetMap}`)
+  assert.equal(((await getRsp.json()) as GetMapRsp).collaborative, true)
+})
+
+test('new post form: no kind creates a Solo Map', async () => {
+  const rsp = await postJson(Endpoint.OnFormNewPost, {title: 'Plain Map'})
+  assert.equal(rsp.status, 200)
+  assert.equal(redisValues.get(`kind:${POST}`), undefined)
+  const getRsp = await fetch(`${serverURL}/${Endpoint.GetMap}`)
+  assert.equal(((await getRsp.json()) as GetMapRsp).collaborative, false)
+})
+
+test('new post form: an empty selection creates a Solo Map', async () => {
+  const rsp = await postJson(Endpoint.OnFormNewPost, {
+    title: 'Plain Map',
+    kind: [],
+  })
+  assert.equal(rsp.status, 200)
+  assert.equal(redisValues.get(`kind:${POST}`), undefined)
+})
+
+test('new post form: an unrecognized kind creates a Solo Map, never the raw client string', async () => {
+  const rsp = await postJson(Endpoint.OnFormNewPost, {
+    title: 'Plain Map',
+    kind: ['anything-else'],
+  })
+  assert.equal(rsp.status, 200)
+  assert.equal(redisValues.get(`kind:${POST}`), undefined)
+})
+
+test('create map post: from an Index Post gives an identical result to the menu form', async () => {
+  const req: CreateMapPostReq = {
+    title: 'Community Map',
+    kind: MapKind.Collaborative,
+  }
+  const rsp = await postJson(Endpoint.CreateMapPost, req)
+  assert.equal(rsp.status, 200)
+  assert.equal(redisValues.get(`kind:${POST}`), MapKind.Collaborative)
+
+  const getRsp = await fetch(`${serverURL}/${Endpoint.GetMap}`)
+  assert.equal(((await getRsp.json()) as GetMapRsp).collaborative, true)
+})
+
+test('index: collaborative is true for a Collaborative Map, absent for a row seeded without the field', async () => {
+  const collab = 't3_collab' as T3
+  const solo = 't3_solo' as T3
+  seedIndexed(collab, {
+    title: 'Community',
+    author: 'anna',
+    createdAt: 2,
+    collaborative: true,
+  })
+  // A pre-feature index-meta row, with no `collaborative` key at all.
+  seedIndexed(solo, {title: 'Solo', author: 'bob', createdAt: 1})
+  seedRedditPost(collab)
+  seedRedditPost(solo)
+
+  const rsp = (await (await getIndex()).json()) as GetIndexRsp
+  assert.equal(rsp.entries.find(e => e.t3 === collab)?.collaborative, true)
+  assert.equal(rsp.entries.find(e => e.t3 === solo)?.collaborative, undefined)
+})
+
 test('index post form: creates a post on the index entrypoint and indexes nothing', async () => {
   seedModerator()
   const req: IndexPostFormReq = {title: '  r/test_sub Community Maps  '}
@@ -1878,6 +2497,20 @@ test('delete index post: a Map Post cannot be deleted through this route', async
   assert.equal(redisHashes.get(`pins:${POST}`)?.size, 1)
 })
 
+test('delete index post: a Collaborative Map Post cannot be deleted through this route either', async () => {
+  seedCollabMap({
+    ownerId: OWNER,
+    pins: [{id: 'p1', location: {lat: 1, lng: 2}, title: 'Cafe'}],
+  })
+  seedRedditPost(POST)
+  seedModerator()
+
+  const rsp = await postJson(Endpoint.DeleteIndexPost, {})
+  assert.equal(rsp.status, 400)
+  assert.deepEqual(deletedPosts, [])
+  assert.equal(redisValues.get(`owner:${POST}`), OWNER)
+})
+
 test('refresh scores: caches what Reddit says and moves the cursor on', async () => {
   const first = 't3_first' as T3
   const second = 't3_second' as T3
@@ -1957,6 +2590,18 @@ test('delete post: the owner deletes the post and everything stored under it', a
   assert.equal(redisHashes.get('index-meta')?.has(POST), false)
 })
 
+test('delete post: also forgets the kind, on a Collaborative Map', async () => {
+  seedCollabMap({
+    ownerId: OWNER,
+    pins: [{id: 'p1', location: {lat: 1, lng: 2}, title: 'Cafe'}],
+  })
+  seedIndexed(POST, {title: 'Berlin', author: 'username', createdAt: 1})
+  seedRedditPost(POST)
+
+  assert.equal((await postJson(Endpoint.DeletePost, {})).status, 200)
+  assert.equal(redisValues.get(`kind:${POST}`), undefined)
+})
+
 test('delete post: a viewer cannot delete someone else s map', async () => {
   seedMap({ownerId: OWNER, pins: []})
   seedIndexed(POST, {title: 'Berlin', author: 'username', createdAt: 1})
@@ -1968,6 +2613,21 @@ test('delete post: a viewer cannot delete someone else s map', async () => {
   assert.deepEqual(deletedPosts, [])
   assert.equal(redisValues.get(`owner:${POST}`), OWNER)
   assert.equal(redisSets.get('index')?.has(POST), true)
+})
+
+test('delete post: a moderator who is not the Owner is forbidden, even on a Collaborative Map', async () => {
+  // Delete Map answers to owning the Post, never to moderating — a
+  // Moderator's reach stops at individual Pins. See ADR-0019.
+  seedCollabMap({ownerId: OWNER, pins: []})
+  seedIndexed(POST, {title: 'Berlin', author: 'username', createdAt: 1})
+  seedRedditPost(POST)
+  requestUserId = MODERATOR
+  seedModerator(MODERATOR)
+
+  const rsp = await postJson(Endpoint.DeletePost, {})
+  assert.equal(rsp.status, 403)
+  assert.deepEqual(deletedPosts, [])
+  assert.equal(redisValues.get(`owner:${POST}`), OWNER)
 })
 
 test('delete post: 404 when the post has no map', async () => {

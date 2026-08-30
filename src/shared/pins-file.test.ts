@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import {test} from 'node:test'
+import type {T2} from '@devvit/web/shared'
 import type {Pin} from './api.ts'
 import {
   formatPinsFile,
@@ -58,6 +59,14 @@ test('writes the version, and omits fields a Pin does not have', () => {
   const file = JSON.parse(formatPinsFile([pin()]))
   assert.equal(file.version, 1)
   assert.deepEqual(Object.keys(file.pins[0]), ['title', 'location'])
+})
+
+test('never writes a Contributor’s identity into an Export', () => {
+  const authored = pin({authorId: 't2_alice' as T2, author: 'alice'})
+  const file = JSON.parse(formatPinsFile([authored]))
+  assert.deepEqual(Object.keys(file.pins[0]), ['title', 'location'])
+  assert.equal('authorId' in file.pins[0], false)
+  assert.equal('author' in file.pins[0], false)
 })
 
 test('leaves createdAt out, so an imported Pin is as new as a dropped one', () => {

@@ -70,7 +70,7 @@ function sortByTitle(pins: Pin[]): Pin[] {
 export type SidebarHandlers = {
   /** A Pin Card was clicked. */
   onSelectCard(pinId: string): void
-  /** A Pin Card's edit control was clicked; Owners only. */
+  /** A Pin Card's edit control was clicked; only where the card offered one. */
   onEditPin(pinId: string): void
   /** A Pin Card's external link was clicked. */
   onOpenLink(url: string): void
@@ -78,11 +78,29 @@ export type SidebarHandlers = {
   onToggle(open: boolean): void
 }
 
+/**
+ * What one Pin Card is allowed to offer, decided once by `canEditPin` in
+ * `render()` — the one place on the client that predicate runs, so calling it
+ * a second time from in here could never disagree with it. `author` is
+ * already resolved to what the card should print, `ownerName` fallback for a
+ * legacy Pin included: this module stays pure display and never learns about
+ * `MapAccess` or `ownerName` itself.
+ */
+export type PinCapability = {canEdit: boolean; author: string | undefined}
+
 export type SidebarState = {
   /** Already narrowed by the Category filter. */
   pins: Pin[]
   selectedPinId: string | undefined
-  isOwner: boolean
+  /** Whether this Map is a Collaborative one — the whole of what decides if a byline shows at all. */
+  collaborative: boolean
+  /**
+   * Whether Add a Pin is on screen for this reader: what the empty-state copy
+   * answers to. Keyed off "the button is there," not "the server would accept
+   * the write" — a logged-out reader on a Collaborative Map sees the button
+   * (see `showLoginPrompt` in `map.ts`) and gets the actionable copy too.
+   */
+  canAdd: boolean
   /** Whether a Category filter is what emptied the list, if it is empty. */
   filtered: boolean
   /**
@@ -90,6 +108,8 @@ export type SidebarState = {
    * Pins', so a filter narrows what is listed without repainting it.
    */
   categoryColors: Map<string, string>
+  /** Every visible Pin's id to what its card may offer. */
+  pinCapabilities: Map<string, PinCapability>
 }
 
 const uncategorizedHeading = 'Uncategorized'
@@ -169,10 +189,15 @@ export function renderSidebar(state: SidebarState): void {
       section.append(heading)
     }
     for (const pin of group.pins) {
+      const capability = state.pinCapabilities.get(pin.id) ?? {
+        canEdit: false,
+        author: undefined,
+      }
       section.append(
         pinCard(
           pin,
-          state.isOwner,
+          capability,
+          state.collaborative,
           pin.id === state.selectedPinId,
           state.categoryColors,
         ),
@@ -202,8 +227,8 @@ function emptyMessage(state: SidebarState): HTMLElement {
   const message = document.createElement('p')
   message.id = 'pin-list-empty'
   if (state.filtered) message.textContent = 'No pins in this category.'
-  else if (state.isOwner) {
-    message.textContent = 'No pins yet — search for a place or drop a pin.'
+  else if (state.canAdd) {
+    message.textContent = 'No pins yet — drop a pin to get started.'
   } else message.textContent = 'No pins yet.'
   return message
 }
@@ -253,7 +278,8 @@ function swatch(color: string): HTMLElement {
 
 function pinCard(
   pin: Pin,
-  isOwner: boolean,
+  capability: PinCapability,
+  collaborative: boolean,
   selected: boolean,
   colors: Map<string, string>,
 ): HTMLElement {
@@ -308,6 +334,17 @@ function pinCard(
 
   body.append(titleRow)
 
+  // Collaborative Maps only — every Pin on a Solo Map is the Owner's, and a
+  // byline on every card would be noise. `capability.author` is already
+  // resolved (a legacy Pin's falls back to the Map's Owner), so this module
+  // never has to know that fallback exists.
+  if (collaborative && capability.author) {
+    const author = document.createElement('p')
+    author.className = 'pin-card-author'
+    author.textContent = `u/${capability.author}`
+    body.append(author)
+  }
+
   if (pin.category) {
     const category = document.createElement('span')
     category.className = 'pin-card-category'
@@ -324,7 +361,7 @@ function pinCard(
 
   card.append(body)
 
-  if (isOwner) {
+  if (capability.canEdit) {
     const actions = document.createElement('div')
     actions.className = 'pin-card-actions'
     const edit = document.createElement('button')

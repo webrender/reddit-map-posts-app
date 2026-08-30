@@ -12,6 +12,27 @@ export async function fetchJson<T>(
   path: string,
   body?: unknown,
 ): Promise<T | undefined> {
+  const result = await fetchJsonResult<T>(path, body)
+  return result.ok ? result.value : undefined
+}
+
+/** What {@link fetchJsonResult} answers. */
+export type FetchResult<T> = {ok: true; value: T} | {ok: false; status: number}
+
+/**
+ * A sibling to {@link fetchJson} for the rare caller that *can* do something
+ * with the reason. On a Collaborative Map, a Contributor racing another
+ * editor of the same Pin gets a 403 or 404 that means something specific — the
+ * Pin was deleted, or is no longer theirs to touch — and collapsing that into
+ * `undefined` alongside a dead network the way `fetchJson` does would lose the
+ * one signal that tells a deliberately-stale client it is stale. Everywhere
+ * else keeps using `fetchJson`, so this is a sibling rather than a change to
+ * it. `status` is `0` for a network failure, which no real response ever is.
+ */
+export async function fetchJsonResult<T>(
+  path: string,
+  body?: unknown,
+): Promise<FetchResult<T>> {
   let rsp: Response
   try {
     rsp = await fetch(
@@ -29,14 +50,14 @@ export async function fetchJson<T>(
     )
   } catch (err) {
     console.error(`HTTP error: ${err instanceof Error ? err.message : err}`)
-    return
+    return {ok: false, status: 0}
   }
 
   if (!rsp.ok) {
     const text = await rsp.text().catch(() => '')
     console.error(`HTTP status ${rsp.status}: ${rsp.statusText}; ${text}`)
-    return
+    return {ok: false, status: rsp.status}
   }
 
-  return (await rsp.json()) as T
+  return {ok: true, value: (await rsp.json()) as T}
 }

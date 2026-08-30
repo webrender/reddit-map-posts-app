@@ -14,30 +14,30 @@
       box-sizing: border-box;
     }
     /* An Index Post never opens full screen, so this is the whole app: one
-       viewport, 512px at most, that must never scroll — the feed owns that
-       gesture and a post pinned to the top of a subreddit is the worst possible
-       place to take it. Everything below is a fixed row or the one flexible
-       band the five Entries sit in. See ADR-0010. */
+           viewport, 512px at most, that must never scroll — the feed owns that
+           gesture and a post pinned to the top of a subreddit is the worst possible
+           place to take it. Everything below is a fixed row or the one flexible
+           band the five Entries sit in. See ADR-0010. */
     html,
     body {
       margin: 0;
       overflow: hidden;
     }
     /* Taken out of flow rather than sized to `100dvh`, which is the difference
-       between "as tall as the frame" and "as tall as the frame says it is".
-       In the feed those disagreed by a few pixels — enough for the document to
-       become scrollable and for the post to eat the first flick of a scroll,
-       while the same page in Reddit's post view was exact. Out of flow there is
-       no document height to disagree about: the root has no in-flow content, so
-       nothing can overflow it however the frame is measured. */
+           between "as tall as the frame" and "as tall as the frame says it is".
+           In the feed those disagreed by a few pixels — enough for the document to
+           become scrollable and for the post to eat the first flick of a scroll,
+           while the same page in Reddit's post view was exact. Out of flow there is
+           no document height to disagree about: the root has no in-flow content, so
+           nothing can overflow it however the frame is measured. */
     body {
       position: fixed;
       inset: 0;
       display: grid;
       /* Both tracks are explicitly allowed to be narrower than their contents.
-         An Entry's title is `nowrap`, so without this the column takes its
-         min-content width from the longest title in the Listing and the whole
-         post scrolls sideways — which inline is not the app's scroll to take. */
+             An Entry's title is `nowrap`, so without this the column takes its
+             min-content width from the longest title in the Listing and the whole
+             post scrolls sideways — which inline is not the app's scroll to take. */
       grid-template-columns: minmax(0, 1fr);
       grid-template-rows: auto minmax(0, 1fr) auto auto;
       padding: 0.5rem;
@@ -79,7 +79,7 @@
       outline-offset: 2px;
     }
     /* Search and Sort share one 44px row rather than stacking, because the
-       second row would cost a whole Entry out of five. */
+           second row would cost a whole Entry out of five. */
     #header {
       display: flex;
       gap: 0.5rem;
@@ -119,8 +119,8 @@
       background: var(--accent-hover);
     }
     /* Square, and only ever on a moderator's screen. It wears the danger
-       colour on hover and not at rest, the same as Delete Map does on a Map
-       Post's toolbar: a header that is red at rest reads as an error. */
+           colour on hover and not at rest, the same as Delete Map does on a Map
+           Post's toolbar: a header that is red at rest reads as an error. */
     #delete-index-btn {
       flex: 0 0 auto;
       width: var(--control-height);
@@ -145,8 +145,8 @@
       overflow: hidden;
     }
     /* The list item is what shares out the band's height; the control inside it
-       fills whatever it gets. Putting the flexing on the button instead does
-       nothing, since the button is not the flex item — its `li` is. */
+           fills whatever it gets. Putting the flexing on the button instead does
+           nothing, since the button is not the flex item — its `li` is. */
     #entries > li {
       display: flex;
       flex: 1 1 auto;
@@ -155,17 +155,17 @@
       max-height: 4.5rem;
     }
     /* The whole row is the tap target: inline, a tap is the only input this
-       post is allowed, so nothing smaller than a row should have to be hit. */
+           post is allowed, so nothing smaller than a row should have to be hit. */
     /* Elastic between a floor and a ceiling rather than a fixed height: the
-       five rows share out whatever the frame turns out to be, so a 512px post
-       doesn't leave a band of dead space above the pager and a shorter one
-       doesn't clip the fifth row. */
+           five rows share out whatever the frame turns out to be, so a 512px post
+           doesn't leave a band of dead space above the pager and a shorter one
+           doesn't clip the fifth row. */
     .entry {
       display: flex;
       min-width: 0;
       /* `min-height: 0` lets a row give up a pixel or two when the frame turns
-         out to be shorter than the five rows' preferred height, so five rows
-         squeeze rather than the fifth one being clipped. */
+             out to be shorter than the five rows' preferred height, so five rows
+             squeeze rather than the fifth one being clipped. */
       min-height: 0;
       overflow: hidden;
       flex: 1 1 auto;
@@ -197,8 +197,8 @@
       text-overflow: ellipsis;
     }
     /* Five of these hold the frame at its final height while the first request
-       is in flight, so nothing jumps when the Entries arrive. Static, not
-       animated: a shimmer in a feed competes with the feed. */
+           is in flight, so nothing jumps when the Entries arrive. Static, not
+           animated: a shimmer in a feed competes with the feed. */
     .skeleton {
       pointer-events: none;
     }
@@ -244,8 +244,8 @@
       visibility: hidden;
     }
     /* The same control the Preview offers, in the same accent and shape, doing
-       the same kind of thing: the one action this screen exists to hand over.
-       See ADR-0010. */
+           the same kind of thing: the one action this screen exists to hand over.
+           See ADR-0010. */
     #create-btn {
       justify-self: center;
       width: 60%;

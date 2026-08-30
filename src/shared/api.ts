@@ -104,6 +104,20 @@ export type Pin = {
   description?: string
   link?: string
   imageUrl?: string
+  /**
+   * The `T2` of whoever added this Pin, on a Collaborative Map. Absent on a
+   * Pin stored before Contributors existed, and on every Pin on a Solo Map,
+   * where it would only ever equal the Owner's — see {@link pinAuthorId} in
+   * `permissions.ts`, which is the one place that fallback is spelled out.
+   * Never accepted from a client: see {@link PinInput}.
+   */
+  authorId?: T2
+  /**
+   * `authorId`'s username, denormalized at write time exactly as
+   * {@link IndexMeta.author} is, for the Pin Card to show without a second
+   * round trip. Never refreshed if the account is renamed or deleted.
+   */
+  author?: string
 }
 
 /** The fields an Owner supplies when adding a Pin. */
@@ -120,8 +134,22 @@ export type PinInput = {
 /** The current Map state for this post. */
 export type GetMapRsp = {
   ownerId: T2
+  /**
+   * The Owner's username, denormalized at creation. What names a legacy Pin
+   * with no {@link Pin.author} of its own on a Collaborative Map — it *is*
+   * the Owner's Pin, and this is the only place the client learns their name.
+   */
+  ownerName: string
   pins: Pin[]
   isOwner: boolean
+  /**
+   * Whether this Map is a Collaborative Map. Not sent as a per-request
+   * "isContributor" or similar: `context.userId` is already available to the
+   * client that reads this response, so `canAddPin`/`canEditPin` compute the
+   * reader's capability locally from this fact plus that id, rather than the
+   * server sending a second opinion about who is asking. See ADR-0019.
+   */
+  collaborative: boolean
   /**
    * Whether the reader moderates this subreddit, which is the whole of what
    * decides if the Default Area control is on screen. Always false for a
@@ -210,6 +238,30 @@ export type IndexEntry = {
    * one. See ADR-0011.
    */
   score?: number
+  /**
+   * Present and `true` only for a Collaborative Map — absent rather than
+   * `false`, the same shape {@link score} uses, so an Entry seeded before this
+   * field existed reads as Solo without a migration. Without it `u/alice · 40
+   * pins` would misattribute forty people's work to Alice. See ADR-0019.
+   */
+  collaborative?: boolean
+}
+
+/**
+ * The two kinds of Map Post, chosen in the New Post Form and fixed at
+ * creation — there is no converting one to the other. See ADR-0019.
+ */
+export type MapKind = (typeof MapKind)[keyof typeof MapKind]
+export const MapKind = {Solo: 'solo', Collaborative: 'collaborative'} as const
+
+/**
+ * Whether a value is one of the two recognized kinds. Asked of a client's
+ * request at creation, so that only a canonical value — or nothing — is ever
+ * written to Redis; a value already in Redis is trusted without this, since
+ * only this app ever writes that key.
+ */
+export function isMapKind(value: string | null | undefined): value is MapKind {
+  return value === MapKind.Solo || value === MapKind.Collaborative
 }
 
 /** Which order a Listing is in. `top` is all-time, ties broken by newest. */
@@ -270,12 +322,18 @@ export type DeleteIndexPostRsp = {ok: true}
  * running inside — `document.title` is this app's own `<title>`, not Reddit's —
  * so quoting one would be quoting the wrong thing, and there is only ever one
  * Post this can mean.
+ *
+ * `collaborative` changes only the description: on a Collaborative Map,
+ * Delete Map destroys every Contributor's work along with the Owner's, and
+ * the confirmation says so rather than reading as if only the Owner stood to
+ * lose anything.
  */
-export function deletePostForm(): Form {
+export function deletePostForm(collaborative: boolean): Form {
   return {
     title: 'Delete this map?',
-    description:
-      'This map and every pin on it will be deleted. This cannot be undone.',
+    description: collaborative
+      ? 'This map and every pin on it — including pins added by other people — will be deleted. This cannot be undone.'
+      : 'This map and every pin on it will be deleted. This cannot be undone.',
     acceptLabel: 'Delete',
     cancelLabel: 'Keep it',
     fields: [],
@@ -299,8 +357,15 @@ export function deleteIndexPostForm(): Form {
   }
 }
 
-/** Asks the server to create a Map Post on the caller's behalf. */
-export type CreateMapPostReq = {title: string}
+/**
+ * Asks the server to create a Map Post on the caller's behalf. `kind` is
+ * already unwrapped to a plain value here — unlike {@link NewPostFormReq},
+ * this is a shape this app's own client code builds, not one Reddit posts
+ * from a raw form submission, so the caller (`map-index.ts`) does the
+ * unwrapping before sending it. Absent, like an unrecognized value, reads as
+ * Solo.
+ */
+export type CreateMapPostReq = {title: string; kind?: string}
 export type CreateMapPostRsp = {url: string}
 
 /**
@@ -321,6 +386,16 @@ export function newPostForm(defaultTitle: string): Form {
         label: 'Title',
         required: true,
         defaultValue: defaultTitle,
+      },
+      {
+        type: 'select',
+        name: 'kind',
+        label: 'Who can add pins?',
+        options: [
+          {label: 'Only me', value: MapKind.Solo},
+          {label: 'Anyone in this community', value: MapKind.Collaborative},
+        ],
+        defaultValue: [MapKind.Solo],
       },
     ],
   }
@@ -367,8 +442,15 @@ export const NewPostFormName = 'newPost'
  * A submitted new post form, as Reddit posts it: the field names from the
  * form, at the top level, with no envelope. Optional because the form is
  * Reddit's to render and the values are the user's to type.
+ *
+ * `kind` is `string[]`, not `string` — a Devvit `select` submits its choice
+ * as an array (`SelectField` is `BaseField<string[]>`) even though this one
+ * never allows more than one, so `routeFormNewPost` reads `req.kind?.[0]`.
+ * Getting this wrong is silent and permanent: `req.kind === 'collaborative'`
+ * simply never matches `['collaborative']`, the Post is created Solo, and
+ * there is no conversion afterward. See ADR-0019.
  */
-export type NewPostFormReq = {title?: string}
+export type NewPostFormReq = {title?: string; kind?: string[]}
 
 /**
  * Names the form a moderator uses to create an Index Post. Paired with
@@ -430,4 +512,4 @@ export const EndpointMethod = {
   [Endpoint.OnMenuNewIndexPost]: 'POST',
   [Endpoint.OnFormNewIndexPost]: 'POST',
   [Endpoint.OnTaskRefreshScores]: 'POST',
-} as const satisfies {[endpoint: string]: 'GET' | 'POST'}
+} as const satisfies {[E in Endpoint]: 'GET' | 'POST'}

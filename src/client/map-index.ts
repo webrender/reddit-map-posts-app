@@ -160,9 +160,12 @@ function renderEntry(entry: IndexEntry): HTMLLIElement {
   meta.className = 'entry-meta'
   // A missing score is left out rather than printed as zero: absent means
   // Reddit could not be reached, and zero would be a claim about the post.
-  // See ADR-0011.
+  // See ADR-0011. `community` is the same shape, for the same reason: absent
+  // means Solo, and printing it only when true is what keeps `u/{Owner}` from
+  // misattributing every Contributor's Pin to the Owner. See ADR-0019.
   meta.textContent = [
     `u/${entry.author}`,
+    entry.collaborative ? 'community' : undefined,
     `${entry.pinCount} ${entry.pinCount === 1 ? 'pin' : 'pins'}`,
     entry.score === undefined ? undefined : `${entry.score} ▲`,
     age(entry.createdAt),
@@ -235,7 +238,11 @@ async function createMap(): Promise<void> {
   if (!title) return
 
   createBtn.disabled = true
-  const req: CreateMapPostReq = {title}
+  // A Devvit `select` submits its choice as `string[]`, unwrapped here since
+  // `CreateMapPostReq` — a shape this app's own code builds — takes a plain
+  // value; see the doc comment on `NewPostFormReq`, which carries the raw
+  // array because Reddit posts that one directly.
+  const req: CreateMapPostReq = {title, kind: form.values.kind?.[0]}
   const rsp = await fetchJson<CreateMapPostRsp>(Endpoint.CreateMapPost, req)
   createBtn.disabled = false
   if (!rsp) {

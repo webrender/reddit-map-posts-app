@@ -3,6 +3,7 @@ import type {IncomingMessage, ServerResponse} from 'node:http'
 import {context, media, type Post, reddit} from '@devvit/web/server'
 import type {
   PartialJsonValue,
+  T2,
   T3,
   TriggerResponse,
   UiResponse,
@@ -36,8 +37,10 @@ import {
   isIndexSort,
   isLatLng,
   isMapBounds,
+  isMapKind,
   type LatLng,
   type MapBounds,
+  MapKind,
   NewPostFormName,
   type NewPostFormReq,
   newPostForm,
@@ -48,6 +51,7 @@ import {
   type UpdatePinReq,
   type UpdatePinRsp,
 } from '../shared/api.ts'
+import {canAddPin, canEditPin, type MapAccess} from '../shared/permissions.ts'
 import {
   isRedditMediaUrl,
   PinCategoryMaxLen,
@@ -69,6 +73,8 @@ import {
   dbGetIndex,
   dbGetIndexMisses,
   dbGetMap,
+  dbGetMapMeta,
+  dbGetPin,
   dbGetScoreCursor,
   dbIsMap,
   dbRecordIndexMiss,
@@ -247,8 +253,10 @@ async function routeGetMap(searchParams: URLSearchParams): Promise<GetMapRsp> {
   if (!map) throw new HttpError(404, 'map not found')
   const rsp: GetMapRsp = {
     ownerId: map.ownerId,
+    ownerName: map.ownerName,
     pins: map.pins,
     isOwner: map.ownerId === context.userId,
+    collaborative: map.collaborative,
     isModerator: moderator,
   }
   if (defaultArea) rsp.defaultArea = defaultArea
@@ -257,7 +265,7 @@ async function routeGetMap(searchParams: URLSearchParams): Promise<GetMapRsp> {
 
 async function routeAddPin(reqMsg: IncomingMessage): Promise<AddPinRsp> {
   const t3 = requirePostId()
-  await requireOwnedMap(t3)
+  await requireAddablePin(t3)
   const req = await readJson<AddPinReq>(reqMsg)
 
   const pin: Pin = {
@@ -265,6 +273,11 @@ async function routeAddPin(reqMsg: IncomingMessage): Promise<AddPinRsp> {
     createdAt: Date.now(),
     location: normalizeLocation(req.location),
     title: normalizeTitle(req.title),
+    // requireAddablePin has already refused a logged-out request, so both of
+    // these are always set — stamped uniformly on both kinds of Map, so a
+    // Pin's shape never depends on which one it landed on. See ADR-0019.
+    authorId: context.userId,
+    author: context.username,
   }
   if (req.category) pin.category = normalizeCategory(req.category)
   if (req.description) pin.description = normalizeDescription(req.description)
@@ -280,8 +293,15 @@ async function routeAddPin(reqMsg: IncomingMessage): Promise<AddPinRsp> {
 
 async function routeUpdatePin(reqMsg: IncomingMessage): Promise<UpdatePinRsp> {
   const t3 = requirePostId()
-  await requireOwnedMap(t3)
+  const meta = await dbGetMapMeta(t3)
+  if (!meta) throw new HttpError(404, 'map not found')
+  // Solo Map: decided from `meta` alone, before the body is even read — see
+  // the comment on `requireCollabPinAccess` for why the two kinds ask this in
+  // a different order.
+  if (!meta.collaborative) requireSoloOwner(meta)
+
   const req = await readJson<UpdatePinReq>(reqMsg)
+  if (meta.collaborative) await requireCollabPinAccess(t3, meta, req.id)
 
   const patch: Partial<Pin> = {}
   if (req.location !== undefined)
@@ -296,6 +316,8 @@ async function routeUpdatePin(reqMsg: IncomingMessage): Promise<UpdatePinRsp> {
   if (req.link !== undefined) {
     patch.link = req.link ? normalizeLink(req.link) : undefined
   }
+  // Authorized above, before any of this: an unauthorized request must never
+  // cost a real Reddit media upload.
   if (req.imageDataUrl) {
     const asset = await media.upload({url: req.imageDataUrl, type: 'image'})
     patch.imageUrl = asset.mediaUrl
@@ -309,15 +331,22 @@ async function routeUpdatePin(reqMsg: IncomingMessage): Promise<UpdatePinRsp> {
 
 async function routeDeletePin(reqMsg: IncomingMessage): Promise<DeletePinRsp> {
   const t3 = requirePostId()
-  await requireOwnedMap(t3)
+  const meta = await dbGetMapMeta(t3)
+  if (!meta) throw new HttpError(404, 'map not found')
+  if (!meta.collaborative) requireSoloOwner(meta)
+
   const req = await readJson<DeletePinReq>(reqMsg)
+  if (meta.collaborative) await requireCollabPinAccess(t3, meta, req.id)
+
   await dbDeletePin(t3, req.id)
   return {ok: true}
 }
 
 /**
- * Adds a whole Export's worth of Pins at once. Gated exactly as every other Pin
- * mutation is — the Owner of the Post the request came from, and no one else.
+ * Adds a whole Export's worth of Pins at once. Owner-only on both kinds of
+ * Map — a Contributor's whole gesture is Pin Drop plus editing what they
+ * dropped, and Import is a 500-Pin bulk add, a flooding vector this app does
+ * not open to anyone but the Owner even on a Collaborative Map.
  *
  * Every entry is checked before any of them is written. An Import that applied
  * most of itself would leave the Owner with no clean retry: Import only ever
@@ -333,7 +362,7 @@ async function routeImportPins(
   reqMsg: IncomingMessage,
 ): Promise<ImportPinsRsp> {
   const t3 = requirePostId()
-  await requireOwnedMap(t3)
+  const map = await requireOwnedMap(t3)
   const req = await readJson<ImportPinsReq>(reqMsg)
 
   // The client has already read the Owner's text with this same reader, and is
@@ -342,7 +371,9 @@ async function routeImportPins(
   const read = readPinsValue(req)
   if ('error' in read) throw new HttpError(400, read.error)
 
-  const pins = read.pins.map(toPin)
+  // Stamped to the importing Owner, on both kinds of Map — Import is
+  // Owner-only, so there is only ever one Contributor it could mean.
+  const pins = read.pins.map(entry => toPin(entry, map.ownerId, map.ownerName))
   await dbAddPins(t3, pins)
   return {pins, droppedImages: read.droppedImages}
 }
@@ -359,12 +390,14 @@ async function routeImportPins(
  * could have uploaded to; this is where that becomes a stored value, and the
  * check is on the server because the text it vets came from a person.
  */
-function toPin(entry: PinExport): Pin {
+function toPin(entry: PinExport, ownerId: T2, ownerName: string): Pin {
   const pin: Pin = {
     id: crypto.randomUUID(),
     createdAt: Date.now(),
     location: normalizeLocation(entry.location),
     title: normalizeTitle(entry.title),
+    authorId: ownerId,
+    author: ownerName,
   }
   if (entry.category) pin.category = normalizeCategory(entry.category)
   if (entry.description)
@@ -427,7 +460,9 @@ async function routeFormNewPost(reqMsg: IncomingMessage): Promise<UiResponse> {
   const problem = titleProblem(title)
   if (problem) return {showToast: {text: `A ${problem}.`}}
 
-  const post = await createMapPost(title)
+  // A Devvit `select` submits its choice as `string[]`, not `string` — see the
+  // doc comment on `NewPostFormReq`.
+  const post = await createMapPost(title, isCollaborativeKind(req.kind?.[0]))
   return {
     showToast: {text: `Post ${post.id} created.`, appearance: 'success'},
     navigateTo: post.url,
@@ -446,8 +481,19 @@ async function routeCreateMapPost(
   const title = req.title?.trim() ?? ''
   const problem = titleProblem(title)
   if (problem) throw new HttpError(400, problem)
-  const post = await createMapPost(title)
+  const post = await createMapPost(title, isCollaborativeKind(req.kind))
   return {url: post.url}
+}
+
+/**
+ * The kind requested at creation, collapsed to the one boolean `dbCreateMap`
+ * wants. Anything that is not exactly {@link MapKind.Collaborative} — absent,
+ * an empty selection, or a string this app has never heard of — reads as
+ * Solo, and the raw value is never the thing that reaches Redis: only this
+ * boolean does. See ADR-0019.
+ */
+function isCollaborativeKind(raw: string | undefined): boolean {
+  return isMapKind(raw) && raw === MapKind.Collaborative
 }
 
 /**
@@ -709,6 +755,7 @@ function toEntry(row: IndexRow, score?: number): IndexEntry {
     createdAt: row.createdAt,
   }
   if (score !== undefined) entry.score = score
+  if (row.collaborative) entry.collaborative = true
   return entry
 }
 
@@ -775,7 +822,7 @@ async function routeRefreshScores(): Promise<TriggerResponse> {
  * from there. Reddit's authorship and this app's ownership agree now, but they
  * are not the same fact, and only one of them decides who may move a Pin.
  */
-async function createMapPost(title: string) {
+async function createMapPost(title: string, collaborative: boolean) {
   const ownerId = context.userId
   if (!ownerId) throw new HttpError(401, 'you must be logged in to make a map')
   const post = await reddit.submitCustomPost({
@@ -783,11 +830,12 @@ async function createMapPost(title: string) {
     runAs: 'USER',
     userGeneratedContent: {text: title},
   })
-  await dbCreateMap(post.id as T3, ownerId, {
-    title,
-    author: context.username ?? '',
-    createdAt: Date.now(),
-  })
+  await dbCreateMap(
+    post.id as T3,
+    ownerId,
+    {title, author: context.username ?? '', createdAt: Date.now()},
+    collaborative,
+  )
   return post
 }
 
@@ -872,6 +920,57 @@ async function requireOwnedMap(t3: T3): Promise<MapData> {
   if (!map) throw new HttpError(404, 'map not found')
   if (map.ownerId !== context.userId) throw new HttpError(403, 'not authorized')
   return map
+}
+
+/** The Map, refusing anyone who may not add a Pin to it — see `canAddPin`. */
+async function requireAddablePin(t3: T3): Promise<void> {
+  const meta = await dbGetMapMeta(t3)
+  if (!meta) throw new HttpError(404, 'map not found')
+  const access: MapAccess = {
+    userId: context.userId,
+    ownerId: meta.ownerId,
+    collaborative: meta.collaborative,
+    isModerator: false,
+  }
+  if (!canAddPin(access)) throw new HttpError(403, 'not authorized')
+}
+
+/**
+ * Solo Map: only the Owner, ever — decided from `meta` alone, with no Pin
+ * lookup and no request body. Called before the body is read, so an
+ * unauthorized request never pays for `readJson` buffering one.
+ */
+function requireSoloOwner(meta: {ownerId: T2}): void {
+  if (context.userId !== meta.ownerId)
+    throw new HttpError(403, 'not authorized')
+}
+
+/**
+ * Collaborative Map: the Map and the Pin, refusing anyone who may not change
+ * that Pin. Unlike {@link requireSoloOwner} this needs `pinId`, which only the
+ * request body carries — the caller reads it first for exactly that reason.
+ *
+ * `canEditPin` is asked with `isModerator: false` first, which a Contributor
+ * editing their own Pin — the common case — already answers without a Reddit
+ * round trip. Only when that says no does this ask `isModerator()`, the one
+ * thing that could still allow it. See ADR-0019.
+ */
+async function requireCollabPinAccess(
+  t3: T3,
+  meta: {ownerId: T2},
+  pinId: string,
+): Promise<void> {
+  const pin = await dbGetPin(t3, pinId)
+  if (!pin) throw new HttpError(404, `pin not found: ${pinId}`)
+  const access: MapAccess = {
+    userId: context.userId,
+    ownerId: meta.ownerId,
+    collaborative: true,
+    isModerator: false,
+  }
+  if (canEditPin(access, pin)) return
+  if (await isModerator()) return
+  throw new HttpError(403, 'not authorized')
 }
 
 async function readJson<T>(reqMsg: IncomingMessage): Promise<T> {

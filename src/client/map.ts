@@ -4,6 +4,7 @@ import {
   navigateTo,
   requestExpandedMode,
   showForm,
+  showLoginPrompt,
   type WebViewMode,
 } from '@devvit/web/client'
 import {
@@ -23,17 +24,19 @@ import {
   type Pin,
   type UpdatePinReq,
 } from '../shared/api.ts'
+import {canAddPin, canEditPin, type MapAccess} from '../shared/permissions.ts'
 import {formatPinsFile, parsePinsFile} from '../shared/pins-file.ts'
 import {categoryColors, pinColor} from './category-color.ts'
 import {
   fetchAddPin,
   fetchClearDefaultArea,
-  fetchDeletePin,
+  fetchDeletePinResult,
   fetchDeletePost,
   fetchGetMap,
   fetchImportPins,
   fetchSetDefaultArea,
   fetchUpdatePin,
+  fetchUpdatePinResult,
   installProxyProtocol,
   proxyExternalUrl,
 } from './fetch.ts'
@@ -43,6 +46,7 @@ import {
   initSidebar,
   isNarrowViewport,
   isSidebarOpen,
+  type PinCapability,
   renderSidebar,
   resolveSelection,
   scrollPinIntoView,
@@ -248,13 +252,21 @@ let map: MapLibreMap
  * ADR-0007.
  */
 let isPreview = false
-let isOwner = false
 /**
- * Whether this reader moderates the subreddit, which is the whole of what
- * decides if the Default Area control is on screen. Never true in a Preview,
- * which does not ask.
+ * Who this reader is and what the Map is, gathered in one place so
+ * `canAddPin`/`canEditPin` — the client's only two callers of them, both in
+ * `render()` and `wireEvents()` — can never drift from what the server used
+ * to decide the same questions. A placeholder until `fetchGetMap` answers;
+ * nothing reads it before then. See ADR-0019.
  */
-let isModerator = false
+let access: MapAccess = {
+  userId: undefined,
+  ownerId: '' as MapAccess['ownerId'],
+  collaborative: false,
+  isModerator: false,
+}
+/** The Owner's username — the byline a legacy Pin with no `author` of its own falls back to. */
+let ownerName = ''
 let pins: Pin[] = []
 /**
  * Where a Map with nothing to frame opens, set by a moderator for the whole
@@ -279,6 +291,16 @@ let pendingMarker: Marker | undefined
 let droppingPin = false
 let toolbarFace: ToolbarFace = 'main'
 let statusTimeout: ReturnType<typeof setTimeout> | undefined
+
+/**
+ * Whether this reader owns the Post — Delete Map, Import and Export, and
+ * (with `isModerator`) whether the Default Area control shows. Derived from
+ * `access` rather than stored a second time, so there is exactly one fact
+ * this can disagree with itself about.
+ */
+function ownsMap(): boolean {
+  return !!access.userId && access.userId === access.ownerId
+}
 
 async function init(): Promise<void> {
   // MapLibre parses tiles in a Web Worker it loads from a separate file. Left to
@@ -317,10 +339,9 @@ async function init(): Promise<void> {
   })
   if (!isPreview) wireMapGestures()
 
-  // A Viewer until the Map says otherwise. The markup cannot know whose Map
-  // this is, so the controls that answer to that start off, and the round trip
-  // that decides it is not a window in which a Viewer can reach them.
-  document.body.classList.add('viewer-mode')
+  // Fail closed until the round trip says otherwise: no capability class is
+  // added yet, which on its own already leaves every control this markup
+  // cannot answer for hidden — see the `body:not(...)` rules in map.html.
   deletePostBtn.hidden = true
   areaBtn.hidden = true
   pinsIoBtn.hidden = true
@@ -334,19 +355,26 @@ async function init(): Promise<void> {
     return
   }
 
-  isOwner = data.isOwner
-  isModerator = data.isModerator
+  access = {
+    userId: context.userId,
+    ownerId: data.ownerId,
+    collaborative: data.collaborative,
+    isModerator: data.isModerator,
+  }
+  ownerName = data.ownerName
   pins = data.pins
   defaultArea = data.defaultArea
-  document.body.classList.toggle('viewer-mode', !isOwner)
+  document.body.classList.toggle('collaborative', access.collaborative)
+  document.body.classList.toggle('can-add-pin', canAddPin(access))
+  document.body.classList.toggle('owns-map', ownsMap())
   // The Preview has no toolbar to hold either of them.
-  deletePostBtn.hidden = isPreview || !isOwner
-  pinsIoBtn.hidden = isPreview || !isOwner
+  deletePostBtn.hidden = isPreview || !ownsMap()
+  pinsIoBtn.hidden = isPreview || !ownsMap()
   // Unlike every other control in the toolbar this one answers to moderating
   // the subreddit rather than to owning the Map, and the two have nothing to do
   // with each other: a moderator sets where every Map opens from whichever Map
   // Post they happen to be reading, including someone else's.
-  areaBtn.hidden = isPreview || !isModerator
+  areaBtn.hidden = isPreview || !access.isModerator
 
   // A Preview is the markers and nothing else: no Pin Cards to build, no
   // toolbar to fill in, and one button that leaves for the reading that has all
@@ -414,14 +442,31 @@ function render(): void {
   renderSidebar({
     pins: visible,
     selectedPinId,
-    isOwner,
+    collaborative: access.collaborative,
+    canAdd: canAddPin(access),
     filtered: !!activeCategory,
     categoryColors: categoryColorByName,
+    // The one place `canEditPin` runs on the client: `sidebar.ts` stays pure
+    // display, taking the answer rather than the ingredients that produce it.
+    pinCapabilities: new Map(visible.map(pin => [pin.id, pinCapability(pin)])),
   })
   showFilterSwatch()
   // Losing the Selected Pin to a filter or a deletion lands in the same place
   // as letting go of it deliberately: the whole Map.
   if (previouslySelected && !selectedPinId) fitToPins(true)
+}
+
+/**
+ * What one Pin's card may offer. `author` falls back to the Map's Owner for a
+ * Pin stored before Contributors existed — the same fallback `pinAuthorId`
+ * uses server-side, spelled out again here because the Sidebar wants a name
+ * to print rather than a `T2` to compare.
+ */
+function pinCapability(pin: Pin): PinCapability {
+  return {
+    canEdit: canEditPin(access, pin),
+    author: pin.author ?? (access.collaborative ? ownerName : undefined),
+  }
 }
 
 /**
@@ -473,7 +518,7 @@ function createMarker(pin: Pin): Marker {
   const selected = pin.id === selectedPinId
   // Only the Selected Pin can be moved, so an off-target tap on any other
   // marker can never drag a Pin somewhere by accident.
-  const draggable = selected && isOwner
+  const draggable = selected && canEditPin(access, pin)
   const marker = new Marker({
     color: selected ? selectedMarkerColor : pinColor(pin, categoryColorByName),
     draggable,
@@ -897,8 +942,12 @@ async function savePin(): Promise<void> {
     if (pendingImageDataUrl) req.imageDataUrl = pendingImageDataUrl
     else if (removeImage) req.removeImage = true
 
-    const rsp = await fetchUpdatePin(req)
-    if (!rsp) return
+    const result = await fetchUpdatePinResult(req)
+    if (!result.ok) {
+      reconcileAfterPinAccessFailure(result.status)
+      return
+    }
+    const rsp = result.value
     const index = pins.findIndex(pin => pin.id === editingPinId)
     if (index !== -1) pins[index] = rsp.pin
 
@@ -920,7 +969,13 @@ async function savePin(): Promise<void> {
   if (pendingImageDataUrl) req.imageDataUrl = pendingImageDataUrl
 
   const rsp = await fetchAddPin(req)
-  if (!rsp) return
+  if (!rsp) {
+    // Unlike the update and delete paths, there is nothing stale here to
+    // reconcile — this Pin never existed for anyone else to have touched —
+    // so a status code has nothing more to say than a plain failure does.
+    flashStatus('Could not add pin. Try again.')
+    return
+  }
   pins.push(rsp.pin)
 
   const addedId = rsp.pin.id
@@ -930,10 +985,43 @@ async function savePin(): Promise<void> {
   selectPin(addedId, 'new')
 }
 
+/**
+ * What a racing edit on a Collaborative Map looks like, now that two people
+ * editing the same Pin at once is routine rather than unreachable.
+ * `fetchJson`'s own reasoning for collapsing every failure into `undefined`
+ * — "none of them can do anything with the reason" — stops being true here:
+ * a **404** is the one signal that tells this deliberately-stale client it is
+ * actually stale, because the Pin was deleted by its author or a Moderator
+ * while this reader still had the card open, and a **403** means a
+ * permission answer changed underneath them mid-edit (the Pin's author, or
+ * this reader's own moderator standing). Both leave the dialog exactly as
+ * wrong to keep open as an ordinary failure does, but only these two have
+ * something more specific to say about why.
+ */
+function reconcileAfterPinAccessFailure(status: number): void {
+  if (status === 404) {
+    pins = pins.filter(pin => pin.id !== editingPinId)
+    renderCategoryOptions()
+    render()
+    closePinDialog()
+    flashStatus('That pin has been deleted.')
+    return
+  }
+  if (status === 403) {
+    closePinDialog()
+    flashStatus('You can no longer edit this pin.')
+    return
+  }
+  flashStatus('Could not save. Try again.')
+}
+
 async function deleteEditingPin(): Promise<void> {
   if (!editingPinId) return
-  const rsp = await fetchDeletePin({id: editingPinId})
-  if (!rsp) return
+  const result = await fetchDeletePinResult({id: editingPinId})
+  if (!result.ok) {
+    reconcileAfterPinAccessFailure(result.status)
+    return
+  }
   pins = pins.filter(pin => pin.id !== editingPinId)
   renderCategoryOptions()
   // A deleted Pin can't stay selected; render() drops it.
@@ -975,16 +1063,32 @@ function closeLinkHelp(): void {
  * Opens Import and Export, which are one dialog because they are one idea from
  * either end: the text Export writes is the text Import reads.
  *
- * Export needs no round trip. The Map already holds every Pin it is showing —
- * that is what the Sidebar is drawn from — so the text is written here, from
- * the same array, and is current by construction.
+ * On a Solo Map, Export needs no round trip: the Map already holds every Pin
+ * it is showing — that is what the Sidebar is drawn from — so the text is
+ * written from the same array, current by construction. That stops being true
+ * on a Collaborative Map, where another Contributor can have added a Pin
+ * since this page loaded and this app otherwise never refetches — the one
+ * place the no-refetch rule (ADR-0019) would hand back a wrong *document*
+ * rather than a merely stale *view*. So this refetches once, on this explicit
+ * gesture, before formatting — Owner-only in practice, since Export already
+ * is.
  *
  * An armed drop is disarmed on the way in. The document-level paste listener is
  * live while one is armed and would take a paste meant for the Import field,
  * feeding an Export to `parseMapLink` and refusing it as an unreadable Map Link.
  */
-function openPinsIo(): void {
+async function openPinsIo(): Promise<void> {
   stopDroppingPin()
+  if (access.collaborative) {
+    // No `full` reading: this only needs the Pins, not a second moderator
+    // round trip.
+    const data = await fetchGetMap(false)
+    if (data) {
+      pins = data.pins
+      renderCategoryOptions()
+      render()
+    }
+  }
   pinsIoExportText.value = formatPinsFile(pins)
   pinsIoImportText.value = ''
   setPinsIoNote('')
@@ -1135,7 +1239,7 @@ function wireDeletePost(): void {
 }
 
 async function confirmDeletePost(): Promise<void> {
-  const form = await showForm(deletePostForm())
+  const form = await showForm(deletePostForm(access.collaborative))
   if (form.action !== 'SUBMITTED') return
 
   deletePostBtn.disabled = true
@@ -1176,11 +1280,34 @@ function wireEvents(): void {
     if (ev.key === 'Escape') setToolbarFace('main')
   })
 
-  if (!isOwner) return
+  // Reaches Pin Drop and the New/Edit Pin dialog: anyone who might need them.
+  // `access.collaborative` stands on its own rather than folding into
+  // `canAddPin(access)` — `canAddPin` is false for a logged-out reader, who
+  // still needs Add a Pin wired so clicking it can prompt login (below)
+  // rather than doing nothing. `access.isModerator` covers a Moderator's own
+  // use of the dialog; on a Solo Map that isn't theirs nothing here is ever
+  // reachable — no button to click, no Pin Card offering Edit — so wiring it
+  // regardless costs nothing.
+  const canReachPinControls =
+    access.collaborative || canAddPin(access) || access.isModerator
+  if (!canReachPinControls) return
 
   // Adding a Pin is one gesture now that there is one add-path: the button arms
   // the drop rather than opening a face to choose from.
   addPinBtn.addEventListener('click', () => {
+    // A logged-out reader on a Collaborative Map still sees this button — a
+    // control that isn't there teaches no one the app exists — but tapping it
+    // can only ask them to log in, never arm the drop.
+    if (!context.userId) {
+      try {
+        showLoginPrompt()
+      } catch (err) {
+        console.error(
+          `login prompt failed; ${err instanceof Error ? err.message : err}`,
+        )
+      }
+      return
+    }
     if (droppingPin) stopDroppingPin()
     else startDroppingPin()
   })
@@ -1247,7 +1374,13 @@ function wireEvents(): void {
   pinDialog.addEventListener('close', () => closePinDialog())
   pinDeleteBtn.addEventListener('click', () => void deleteEditingPin())
 
-  pinsIoBtn.addEventListener('click', () => openPinsIo())
+  // Import and Export stay the Owner's alone, on both kinds of Map — see
+  // ADR-0019. `ownsMap()` implies `canReachPinControls` above (an Owner is
+  // always logged in with `canAddPin` true), so this never wires without
+  // having already passed that gate.
+  if (!ownsMap()) return
+
+  pinsIoBtn.addEventListener('click', () => void openPinsIo())
   pinsIoCopyBtn.addEventListener('click', () => void copyExport())
   pinsIoAddBtn.addEventListener('click', () => void importPins())
   pinsIoCloseBtn.addEventListener('click', () => pinsIoDialog.close())
