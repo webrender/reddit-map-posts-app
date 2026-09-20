@@ -2,21 +2,27 @@ import {AJAXError, addProtocol} from 'maplibre-gl'
 import {
   type AddPinReq,
   type AddPinRsp,
+  type AddRegionReq,
+  type AddRegionRsp,
   type ClearDefaultAreaRsp,
   type DeletePinReq,
   type DeletePinRsp,
   type DeletePostRsp,
+  type DeleteRegionReq,
+  type DeleteRegionRsp,
   Endpoint,
   GetMapFullParam,
   type GetMapRsp,
-  type ImportPinsReq,
-  type ImportPinsRsp,
+  type ImportMapReq,
+  type ImportMapRsp,
   type SetDefaultAreaReq,
   type SetDefaultAreaRsp,
   type SetSummaryReq,
   type SetSummaryRsp,
   type UpdatePinReq,
   type UpdatePinRsp,
+  type UpdateRegionReq,
+  type UpdateRegionRsp,
 } from '../shared/api.ts'
 import {type FetchResult, fetchJson, fetchJsonResult} from './json.ts'
 
@@ -71,13 +77,14 @@ export async function fetchDeletePinResult(
 }
 
 /**
- * Adds a whole Export's worth of Pins at once. Names no Map for the reason
- * every Pin route does not: the Map is the Post this page is running in.
+ * Applies a whole Export at once: its Pins are added and its Summary and
+ * Regions replace what the Map has. Names no Map for the reason every Pin route
+ * does not: the Map is the Post this page is running in.
  */
-export async function fetchImportPins(
-  req: ImportPinsReq,
-): Promise<ImportPinsRsp | undefined> {
-  return fetchJson(Endpoint.ImportPins, req)
+export async function fetchImportMap(
+  req: ImportMapReq,
+): Promise<ImportMapRsp | undefined> {
+  return fetchJson(Endpoint.ImportMap, req)
 }
 
 /** Takes no arguments: the Post to delete is the one this page is running in. */
@@ -159,4 +166,27 @@ export async function fetchSetSummary(
   req: SetSummaryReq,
 ): Promise<SetSummaryRsp | undefined> {
   return fetchJson(Endpoint.SetSummary, req)
+}
+
+/**
+ * The three Region writes, in the shape of {@link fetchSetSummary} and for the
+ * same reason: they name no Map, and the caller has nothing more specific to say
+ * about a failure than that it happened.
+ */
+export async function fetchAddRegion(
+  req: AddRegionReq,
+): Promise<AddRegionRsp | undefined> {
+  return fetchJson(Endpoint.AddRegion, req)
+}
+
+export async function fetchUpdateRegion(
+  req: UpdateRegionReq,
+): Promise<UpdateRegionRsp | undefined> {
+  return fetchJson(Endpoint.UpdateRegion, req)
+}
+
+export async function fetchDeleteRegion(
+  req: DeleteRegionReq,
+): Promise<DeleteRegionRsp | undefined> {
+  return fetchJson(Endpoint.DeleteRegion, req)
 }

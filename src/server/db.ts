@@ -5,7 +5,9 @@ import {
   MapKind,
   type Pin,
   parseMapBounds,
+  type Region,
 } from '../shared/api.ts'
+import {RegionMaxCount} from '../shared/map-file.ts'
 import {HttpError} from './http-error.ts'
 
 export type MapData = {
@@ -21,6 +23,8 @@ export type MapData = {
   /** The Map's Summary, absent where none has been written. See ADR-0020. */
   summary?: string
   pins: Pin[]
+  /** The Map's Regions, in no particular order; `[]` where it has none. */
+  regions: Region[]
 }
 
 /**
@@ -29,21 +33,27 @@ export type MapData = {
  * other the way a single read-modify-write of one JSON blob would.
  */
 export async function dbGetMap(t3: T3): Promise<MapData | undefined> {
-  const [ownerId, kind, summary, metaJson, pinsHash] = await Promise.all([
-    redis.get(ownerKey(t3)),
-    redis.get(kindKey(t3)),
-    redis.get(summaryKey(t3)),
-    redis.hGet(INDEX_META_KEY, t3),
-    redis.hGetAll(pinsKey(t3)),
-  ])
+  const [ownerId, kind, summary, metaJson, pinsHash, regionsHash] =
+    await Promise.all([
+      redis.get(ownerKey(t3)),
+      redis.get(kindKey(t3)),
+      redis.get(summaryKey(t3)),
+      redis.hGet(INDEX_META_KEY, t3),
+      redis.hGetAll(pinsKey(t3)),
+      redis.hGetAll(regionsKey(t3)),
+    ])
   if (!ownerId) return undefined
   const pins = Object.values(pinsHash).map(json => JSON.parse(json) as Pin)
+  const regions = Object.values(regionsHash).map(
+    json => JSON.parse(json) as Region,
+  )
   const ownerName = metaJson ? (JSON.parse(metaJson) as IndexMeta).author : ''
   const map: MapData = {
     ownerId: ownerId as T2,
     ownerName,
     collaborative: kind === MapKind.Collaborative,
     pins,
+    regions,
   }
   // Absent rather than empty: a Map with no Summary and a Map whose Summary is
   // a blank string are the same Map, and only one of them is a fact.
@@ -86,6 +96,64 @@ export async function dbClearSummary(t3: T3): Promise<void> {
   await redis.del(summaryKey(t3))
 }
 
+/**
+ * Adds a Region, refusing a Map that already holds {@link RegionMaxCount}. The
+ * count and the write are not one atomic step, and that is accepted: two
+ * Moderators racing to draw the twenty-fifth could land it, and the ceiling
+ * exists to bound a value's size rather than to be exact. Locking would be the
+ * whole-hash WATCH ADR-0019 warns against.
+ */
+export async function dbAddRegion(t3: T3, region: Region): Promise<void> {
+  await requireOwnerExists(t3)
+  if ((await redis.hLen(regionsKey(t3))) >= RegionMaxCount) {
+    throw new HttpError(400, `a map holds at most ${RegionMaxCount} regions`)
+  }
+  await redis.hSet(regionsKey(t3), {[region.id]: JSON.stringify(region)})
+}
+
+/**
+ * A whole-object read-modify-write, and deliberately last-write-wins, for the
+ * reason {@link dbUpdatePin} gives at length. A Region deleted out from under an
+ * editor is a loud 404 rather than a silent loss, which is the case that
+ * matters. Do not add locking; ADR-0019's closing paragraph is the argument.
+ */
+export async function dbUpdateRegion(
+  t3: T3,
+  id: string,
+  patch: Partial<Pick<Region, 'name' | 'polygon'>>,
+): Promise<Region> {
+  await requireOwnerExists(t3)
+  const existingJson = await redis.hGet(regionsKey(t3), id)
+  if (!existingJson) throw new HttpError(404, `region not found: ${id}`)
+  const region = {...(JSON.parse(existingJson) as Region), ...patch}
+  await redis.hSet(regionsKey(t3), {[id]: JSON.stringify(region)})
+  return region
+}
+
+export async function dbDeleteRegion(t3: T3, id: string): Promise<void> {
+  await requireOwnerExists(t3)
+  await redis.hDel(regionsKey(t3), [id])
+}
+
+/**
+ * Replaces every Region the Map has with `regions`, for Import. The `del` and
+ * the `hSet` are one transaction: a crash between two separate writes would
+ * leave a Map with no Regions at all, and an Import that fails halfway must
+ * leave the Map as it found it.
+ */
+export async function dbReplaceRegions(
+  t3: T3,
+  regions: readonly Region[],
+): Promise<void> {
+  await requireOwnerExists(t3)
+  const fields: {[id: string]: string} = {}
+  for (const region of regions) fields[region.id] = JSON.stringify(region)
+  await atomically(async tx => {
+    await tx.del(regionsKey(t3))
+    if (regions.length) await tx.hSet(regionsKey(t3), fields)
+  })
+}
+
 export async function dbCreateMap(
   t3: T3,
   ownerId: T2,
@@ -105,7 +173,7 @@ export async function dbCreateMap(
       [t3]: JSON.stringify({...meta, collaborative}),
     })
   })
-  return {ownerId, ownerName: meta.author, collaborative, pins: []}
+  return {ownerId, ownerName: meta.author, collaborative, pins: [], regions: []}
 }
 
 /**
@@ -310,7 +378,7 @@ export async function dbClearIndexMiss(t3: T3): Promise<void> {
 
 /**
  * Forgets a Map entirely, at its Owner's request: the index entries, the owner
- * key, the kind, and every Pin. Unlike {@link dbUnlistMap} this is not a guess
+ * key, the kind, the Summary, every Region, and every Pin. Unlike {@link dbUnlistMap} this is not a guess
  * about what Reddit did — the Owner asked for it and the Post is going with
  * it, so there is nothing left for the Pins, or the kind, to belong to.
  */
@@ -321,6 +389,7 @@ export async function dbDeleteMap(t3: T3): Promise<void> {
     redis.del(pinsKey(t3)),
     redis.del(kindKey(t3)),
     redis.del(summaryKey(t3)),
+    redis.del(regionsKey(t3)),
   ])
 }
 
@@ -417,6 +486,17 @@ function kindKey(t3: T3): string {
  */
 function summaryKey(t3: T3): string {
   return `summary:${t3}`
+}
+
+/**
+ * Holds the Map's Regions as a hash, one field per Region id — mirroring
+ * {@link pinsKey}, so one Region can be written without a read-modify-write of
+ * the whole set. Its own key for {@link kindKey}'s reason: `owner:{t3}`'s mere
+ * existence is what {@link dbIsMap} reads. `dbDeleteMap` must delete it; an
+ * orphaned key per deleted Map is invisible and permanent.
+ */
+function regionsKey(t3: T3): string {
+  return `regions:${t3}`
 }
 
 async function requireOwnerExists(t3: T3): Promise<void> {

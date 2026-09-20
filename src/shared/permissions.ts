@@ -55,7 +55,12 @@ export function canEditPin(access: MapAccess, pin: Pin): boolean {
 }
 
 /**
- * Whether `access.userId` may write this Map's Summary. Solo: only the Owner,
+ * Whether `access.userId` may write the Map's own account of itself — its
+ * Summary and its Regions. One predicate for both, deliberately: two with the
+ * same body would be two spellings of one rule, and would drift the first time
+ * either was amended. See ADR-0021.
+ *
+ * Solo: only the Owner,
  * exactly as {@link canEditPin} — moderating grants nothing on a Solo Map.
  * Collaborative: the Owner, or a Moderator.
  *
@@ -73,7 +78,7 @@ export function canEditPin(access: MapAccess, pin: Pin): boolean {
  * no `authorId` here for `undefined === undefined` to go wrong on, so it is not
  * literally that bug — the ordering is kept so all three predicates read alike.
  */
-export function canEditSummary(access: MapAccess): boolean {
+export function canEditMap(access: MapAccess): boolean {
   if (!access.userId) return false
   if (!access.collaborative) return access.userId === access.ownerId
   return access.userId === access.ownerId || access.isModerator

@@ -1,4 +1,4 @@
-import {isHttpUrl} from '../shared/pins-file.ts'
+import {isHttpUrl} from '../shared/map-file.ts'
 
 /**
  * The small Markdown subset a Summary and a Pin's description are written in,

@@ -8,6 +8,7 @@ import {
   type WebViewMode,
 } from '@devvit/web/client'
 import {
+  type GeoJSONSource,
   LngLatBounds,
   MapLibreMap,
   Marker,
@@ -19,35 +20,61 @@ import './theme.css'
 import {
   type AddPinReq,
   deletePostForm,
+  type ImportMapReq,
+  type ImportMapRsp,
+  importOverwriteForm,
   type LatLng,
   type MapBounds,
   type Pin,
+  type Region,
   type UpdatePinReq,
 } from '../shared/api.ts'
 import {
+  formatMapFile,
+  parseMapFile,
+  RegionMaxCount,
+  RegionVertexMaxCount,
+  RegionVertexMinCount,
+} from '../shared/map-file.ts'
+import {
   canAddPin,
+  canEditMap,
   canEditPin,
-  canEditSummary,
   type MapAccess,
 } from '../shared/permissions.ts'
-import {formatPinsFile, parsePinsFile} from '../shared/pins-file.ts'
-import {categoryColors, pinColor} from './category-color.ts'
+import {
+  categoryColors,
+  pinColor,
+  regionColors,
+  uncategorizedColor,
+} from './category-color.ts'
 import {
   fetchAddPin,
+  fetchAddRegion,
   fetchClearDefaultArea,
   fetchDeletePinResult,
   fetchDeletePost,
+  fetchDeleteRegion,
   fetchGetMap,
-  fetchImportPins,
+  fetchImportMap,
   fetchSetDefaultArea,
   fetchSetSummary,
   fetchUpdatePin,
   fetchUpdatePinResult,
+  fetchUpdateRegion,
   installProxyProtocol,
   proxyExternalUrl,
 } from './fetch.ts'
 import {parseMapLink} from './map-link.ts'
 import {renderMarkdown} from './markdown.ts'
+import {
+  groupPinsByRegion,
+  regionAtLocation,
+  regionBounds,
+  regionCentroid,
+  regionRing,
+  sortRegionsOldestFirst,
+} from './region.ts'
 import {
   filterPins,
   initSidebar,
@@ -57,6 +84,8 @@ import {
   renderSidebar,
   resolveSelection,
   scrollPinIntoView,
+  scrollRegionIntoView,
+  setActiveRegionSection,
   setSelectedCard,
   setSidebarOpen,
 } from './sidebar.ts'
@@ -148,6 +177,52 @@ const pinsIoCloseBtn = document.getElementById(
 const pinsIoNote = document.getElementById(
   'pins-io-note',
 ) as HTMLParagraphElement
+
+const regionsBtn = document.getElementById('regions-btn') as HTMLButtonElement
+const toolbarRegion = document.getElementById(
+  'toolbar-region',
+) as HTMLDivElement
+const regionUndoBtn = document.getElementById(
+  'region-undo-btn',
+) as HTMLButtonElement
+const regionDoneBtn = document.getElementById(
+  'region-done-btn',
+) as HTMLButtonElement
+const regionCloseBtn = document.getElementById(
+  'region-close',
+) as HTMLButtonElement
+const regionsDialog = document.getElementById(
+  'regions-dialog',
+) as HTMLDialogElement
+const regionsList = document.getElementById('regions-list') as HTMLUListElement
+const regionsEmpty = document.getElementById(
+  'regions-empty',
+) as HTMLParagraphElement
+const regionsNote = document.getElementById(
+  'regions-note',
+) as HTMLParagraphElement
+const regionsDrawBtn = document.getElementById(
+  'regions-draw',
+) as HTMLButtonElement
+const regionsCloseBtn = document.getElementById(
+  'regions-close',
+) as HTMLButtonElement
+const regionDialog = document.getElementById(
+  'region-dialog',
+) as HTMLDialogElement
+const regionForm = document.getElementById('region-form') as HTMLFormElement
+const regionDialogTitle = document.getElementById(
+  'region-dialog-title',
+) as HTMLHeadingElement
+const regionNameInput = document.getElementById(
+  'region-name',
+) as HTMLInputElement
+const regionCancelBtn = document.getElementById(
+  'region-cancel',
+) as HTMLButtonElement
+const regionSaveBtn = document.getElementById(
+  'region-save',
+) as HTMLButtonElement
 
 const mapSummary = document.getElementById('map-summary') as HTMLElement
 const mapSummaryBody = document.getElementById(
@@ -241,6 +316,18 @@ const flashStatusMs = 4000
 /** How close the Map gets when it goes to one Pin rather than framing them all. */
 const pinZoom = 15
 
+/** The one GeoJSON source every Region, and the ring being traced, is drawn from. */
+const regionSourceId = 'regions'
+const regionFillLayerId = 'regions-fill'
+const regionLineLayerId = 'regions-line'
+
+/** How long a camera move that is only a nicety takes, unless the reader has asked for none. */
+const flightMs = 600
+
+/** What the Map is waiting for while a new Region is being traced. */
+const traceInstruction = 'Click the map to place each corner of the region.'
+const reshapeInstruction = 'Drag a point to reshape the region.'
+
 /**
  * Whether a Map Link can be pasted at all, which needs a keyboard to press ⌘V
  * on and no field to press it into. A touch device has neither, and the links
@@ -268,12 +355,12 @@ const dropInstruction = canPasteMapLink
 type SelectSource = 'card' | 'marker' | 'new' | 'drag'
 
 /**
- * Which of the toolbar's three faces is showing. The two that aren't `main` are
+ * Which of the toolbar's four faces is showing. The two that aren't `main` are
  * modes: they replace the controls rather than sitting beside them, because a
  * control wide enough to be worth reading leaves a narrow toolbar no room for
  * the buttons.
  */
-type ToolbarFace = 'main' | 'area' | 'filter'
+type ToolbarFace = 'main' | 'area' | 'region' | 'filter'
 
 let map: MapLibreMap
 /**
@@ -310,6 +397,38 @@ let summary: string | undefined
  * subreddit and absent where none has. See ADR-0014.
  */
 let defaultArea: MapBounds | undefined
+/**
+ * The Map's Regions, in no particular order. Which Pins are in which is never
+ * stored: {@link regionIdByPin} is worked out from these and the Pins' Locations
+ * every time `render()` runs. See ADR-0021.
+ */
+let regions: Region[] = []
+/** Every Region's name to its colour, rebuilt whenever the Regions change. */
+let regionColorByName = new Map<string, string>()
+/** Pin id to the id of the Region it is in; absent for a Pin in none. */
+let regionIdByPin = new Map<string, string>()
+/**
+ * The Region the Sidebar's scroll has taken the camera to, or none. While one is
+ * set the Map's markers are narrowed to its Pins — composed with the Category
+ * filter, not replacing it.
+ */
+let activeRegionId: string | undefined
+/**
+ * Whether the style has loaded, which is what a source and a layer need before
+ * they can be added: `addSource` before it throws. Nothing in this app added
+ * either until Regions, because every marker is a DOM `Marker`.
+ */
+let regionsReady = false
+const regionLabels = new Map<string, Marker>()
+/**
+ * The ring being traced, or a Region being reshaped (`regionId` set). Present
+ * exactly while the toolbar shows its region face.
+ */
+type RegionDraft = {regionId: string | undefined; vertices: LatLng[]}
+let regionDraft: RegionDraft | undefined
+let regionVertexMarkers: Marker[] = []
+/** The Region the name dialog is renaming, or none where it is naming the traced one. */
+let namingRegionId: string | undefined
 const markers = new Map<string, Marker>()
 /**
  * Which colour each Category on this Map wears, rebuilt whenever the Pins
@@ -374,6 +493,14 @@ async function init(): Promise<void> {
     interactive: !isPreview,
     pixelRatio: Math.min(window.devicePixelRatio || 1, maxPixelRatio),
   })
+  // A source and a layer cannot be added before the style has loaded — the
+  // first `addSource` would throw — and `init` awaits `fetchGetMap` straight
+  // away, so in practice the data arrives first and the temptation is to draw at
+  // once. `regionsReady` is what every later `renderRegions()` waits behind.
+  map.once('load', () => {
+    regionsReady = true
+    renderRegions()
+  })
   if (!isPreview) wireMapGestures()
 
   // Fail closed until the round trip says otherwise: no capability class is
@@ -382,6 +509,7 @@ async function init(): Promise<void> {
   deletePostBtn.hidden = true
   areaBtn.hidden = true
   pinsIoBtn.hidden = true
+  regionsBtn.hidden = true
 
   const data = await fetchGetMap(!isPreview)
   // Nothing to draw and nothing wired up, so the toolbar the page painted
@@ -402,13 +530,17 @@ async function init(): Promise<void> {
   pins = data.pins
   summary = data.summary
   defaultArea = data.defaultArea
+  setRegions(data.regions)
   document.body.classList.toggle('collaborative', access.collaborative)
   document.body.classList.toggle('can-add-pin', canAddPin(access))
   document.body.classList.toggle('owns-map', ownsMap())
-  document.body.classList.toggle('can-edit-summary', canEditSummary(access))
+  document.body.classList.toggle('can-edit-map', canEditMap(access))
   // The Preview has no toolbar to hold either of them.
   deletePostBtn.hidden = isPreview || !ownsMap()
   pinsIoBtn.hidden = isPreview || !ownsMap()
+  // Regions are the Map speaking about itself, like the Summary, so this is not
+  // the Owner's alone: see `canEditMap`.
+  regionsBtn.hidden = isPreview || !canEditMap(access)
   // Unlike every other control in the toolbar this one answers to moderating
   // the subreddit rather than to owning the Map, and the two have nothing to do
   // with each other: a moderator sets where every Map opens from whichever Map
@@ -421,6 +553,8 @@ async function init(): Promise<void> {
   if (isPreview) {
     categoryColorByName = categoryColors(pins)
     renderMarkers(pins)
+    // Drawn, filled and labelled, and answering nothing: no handler is wired.
+    renderRegions()
     fitToPins()
     wireOpenMap()
     return
@@ -434,11 +568,14 @@ async function init(): Promise<void> {
     },
     onOpenLink: url => navigateTo(url),
     onToggle: () => map.resize(),
+    onSelectRegion: regionId => selectRegion(regionId),
+    onActiveRegionChange: regionId => setActiveRegion(regionId),
   })
 
   renderCategoryOptions()
   renderSummary()
   render()
+  renderRegions()
   // Open where there is room for a column and something to list; a narrow
   // viewport or an empty Map both start collapsed.
   setSidebarOpen(!isNarrowViewport() && pins.length > 0)
@@ -466,19 +603,489 @@ function wireMapGestures(): void {
       openNewPinDialog({lat: ev.lngLat.lat, lng: ev.lngLat.lng})
       return
     }
+    // Tracing: every click is a corner, wherever it lands — including on
+    // another Region, which is why this is asked before that is.
+    if (regionDraft) {
+      if (!regionDraft.regionId) addRegionVertex(ev.lngLat.wrap())
+      return
+    }
+    // A click that lands on a Region selects it and stops here. It has to stop
+    // here: falling through would light-dismiss the Sidebar on a phone, closing
+    // the very panel the tap was meant to scroll. It is answered from the
+    // polygons rather than from a layer query, so it needs no layer to exist and
+    // agrees with Pin membership by construction.
+    const hit = regionAtLocation(ev.lngLat, regions)
+    if (hit) {
+      if (!isNarrowViewport()) setSidebarOpen(true)
+      selectRegion(hit.id)
+      return
+    }
     // Light-dismiss: where the Sidebar overlays the Map, the exposed strip of
     // Map is the quickest way to get the rest of it back.
     if (isNarrowViewport() && isSidebarOpen()) setSidebarOpen(false)
   })
 }
 
+// --- Regions -----------------------------------------------------------------
+
+/** Takes the Map's Regions and the colours their names ask for. */
+function setRegions(next: Region[]): void {
+  regions = next
+  regionColorByName = regionColors(regions)
+}
+
+/**
+ * Draws every Region: a translucent fill and an outline from one GeoJSON source
+ * beneath the markers, and a DOM label at each polygon's middle. Safe to call
+ * at any time — the labels are DOM and need no style, and the source waits
+ * behind {@link regionsReady}, which is what stops the first `addSource` from
+ * running ahead of the style and throwing.
+ */
+function renderRegions(): void {
+  renderRegionShapes()
+  renderRegionLabels()
+}
+
+type RegionFeature = {
+  type: 'Feature'
+  properties: {color: string; active: boolean}
+  geometry:
+    | {type: 'Polygon'; coordinates: [number, number][][]}
+    | {type: 'LineString'; coordinates: [number, number][]}
+}
+
+function regionFeatures(): RegionFeature[] {
+  const features: RegionFeature[] = []
+  for (const region of regions) {
+    // The Region being reshaped is drawn from the draft instead, so the ring the
+    // reader is dragging is the only one on screen.
+    if (region.id === regionDraft?.regionId) continue
+    features.push({
+      type: 'Feature',
+      properties: {
+        color: regionColorByName.get(region.name) ?? uncategorizedColor,
+        active: region.id === activeRegionId,
+      },
+      geometry: {type: 'Polygon', coordinates: [regionRing(region.polygon)]},
+    })
+  }
+  const vertices = regionDraft?.vertices
+  if (vertices && vertices.length >= 2) {
+    features.push({
+      type: 'Feature',
+      properties: {color: selectedMarkerColor, active: true},
+      geometry:
+        vertices.length >= 3
+          ? {type: 'Polygon', coordinates: [regionRing(vertices)]}
+          : {
+              type: 'LineString',
+              coordinates: vertices.map(v => [v.lng, v.lat]),
+            },
+    })
+  }
+  return features
+}
+
+function renderRegionShapes(): void {
+  if (!regionsReady) return
+  const data = {type: 'FeatureCollection' as const, features: regionFeatures()}
+  const source = map.getSource<GeoJSONSource>(regionSourceId)
+  if (source) {
+    source.setData(data)
+    return
+  }
+  map.addSource(regionSourceId, {type: 'geojson', data})
+  map.addLayer({
+    id: regionFillLayerId,
+    type: 'fill',
+    source: regionSourceId,
+    filter: ['==', ['geometry-type'], 'Polygon'],
+    paint: {
+      'fill-color': ['get', 'color'],
+      'fill-opacity': ['case', ['get', 'active'], 0.24, 0.12],
+    },
+  })
+  map.addLayer({
+    id: regionLineLayerId,
+    type: 'line',
+    source: regionSourceId,
+    paint: {'line-color': ['get', 'color'], 'line-width': 2},
+  })
+}
+
+/**
+ * A Region's name at the middle of its polygon, as a DOM marker rather than a
+ * symbol layer for the reason a Pin's label is one: a symbol layer needs glyphs
+ * from the style's font stack, and a font name the style does not have fails
+ * silently — no labels, no error, nothing in the console. A DOM marker is also a
+ * real click target, and is themed by the CSS that already exists.
+ */
+function renderRegionLabels(): void {
+  for (const label of regionLabels.values()) label.remove()
+  regionLabels.clear()
+  for (const region of regions) {
+    if (region.id === regionDraft?.regionId) continue
+    const element = document.createElement('div')
+    element.className = 'region-label'
+    element.textContent = region.name
+    element.style.borderColor =
+      regionColorByName.get(region.name) ?? uncategorizedColor
+    // A Preview's labels have nothing to click.
+    if (!isPreview) {
+      element.addEventListener('click', ev => {
+        ev.stopPropagation()
+        if (!isNarrowViewport()) setSidebarOpen(true)
+        selectRegion(region.id)
+      })
+    }
+    const at = regionCentroid(region)
+    regionLabels.set(
+      region.id,
+      new Marker({element, anchor: 'center'})
+        .setLngLat([at.lng, at.lat])
+        .addTo(map),
+    )
+  }
+}
+
+/**
+ * Makes a Region the one the tour is on — or, with none, the whole Map — and
+ * narrows what the Map draws to match. It does not rebuild the Sidebar: the tour
+ * moves every few hundred pixels of scroll, and a rebuild would throw away the
+ * position the reader is scrolling from.
+ */
+function setActiveRegion(id: string | undefined, fit: boolean = true): void {
+  if (id === activeRegionId) return
+  activeRegionId = id
+  selectedPinId = resolveSelection(selectedPinId, mapVisiblePins())
+  renderMarkers(mapVisiblePins())
+  setSelectedCard(selectedPinId)
+  setActiveRegionSection(id)
+  renderRegionShapes()
+  if (fit) fitToPins(true)
+}
+
+/**
+ * A click on a Region's heading, label or polygon. Selecting the active Region
+ * again lets go of it, as it does for a Pin, so there is always a way back out
+ * to the whole Map. The Sidebar is scrolled to it too: this is the app
+ * scrolling, and the tour ignores that.
+ */
+function selectRegion(id: string | undefined): void {
+  const next = id === activeRegionId ? undefined : id
+  setActiveRegion(next)
+  if (next) scrollRegionIntoView(next)
+}
+
+function enterRegionFace(): void {
+  document.body.classList.add('tracing-region')
+  regionUndoBtn.hidden = !!regionDraft?.regionId
+  setStatus(regionDraft?.regionId ? reshapeInstruction : traceInstruction)
+  renderRegionDraft()
+}
+
+/** Leaves the face, and with it whatever was half traced. */
+function endRegionDraft(): void {
+  document.body.classList.remove('tracing-region')
+  regionDraft = undefined
+  clearVertexMarkers()
+  setStatus('')
+  renderRegions()
+}
+
+function clearVertexMarkers(): void {
+  for (const marker of regionVertexMarkers) marker.remove()
+  regionVertexMarkers = []
+}
+
+/**
+ * Starts tracing a new Region, or — given an id — reshaping an existing one,
+ * which re-enters the same face with its vertices as draggable handles.
+ */
+function beginRegionDraft(regionId?: string): void {
+  const existing = regions.find(region => region.id === regionId)
+  regionDraft = {
+    regionId: existing?.id,
+    vertices: existing ? existing.polygon.map(v => ({...v})) : [],
+  }
+  if (existing) {
+    map.fitBounds(areaBounds(regionBounds(existing)) as LngLatBounds, {
+      padding: fitPadding,
+      duration: 0,
+    })
+  }
+  setToolbarFace('region')
+}
+
+function addRegionVertex(at: LatLng): void {
+  const draft = regionDraft
+  if (!draft) return
+  if (draft.vertices.length >= RegionVertexMaxCount) {
+    flashStatus(
+      `A region can have at most ${RegionVertexMaxCount} points.`,
+      traceInstruction,
+    )
+    return
+  }
+  draft.vertices.push({lat: at.lat, lng: at.lng})
+  renderRegionDraft()
+}
+
+function undoRegionVertex(): void {
+  if (!regionDraft || regionDraft.regionId) return
+  regionDraft.vertices.pop()
+  renderRegionDraft()
+}
+
+/** Redraws the ring, its handles, and which of the face's buttons are live. */
+function renderRegionDraft(): void {
+  clearVertexMarkers()
+  const draft = regionDraft
+  if (draft) {
+    const reshaping = !!draft.regionId
+    draft.vertices.forEach((vertex, index) => {
+      regionVertexMarkers.push(createVertexMarker(vertex, index, reshaping))
+    })
+    regionUndoBtn.disabled = draft.vertices.length === 0
+    // A reshape is written a handle at a time, so there is nothing left for
+    // Done to save; a new ring is not a Region until it has enough corners.
+    regionDoneBtn.disabled =
+      !reshaping && draft.vertices.length < RegionVertexMinCount
+  }
+  renderRegions()
+}
+
+function createVertexMarker(
+  vertex: LatLng,
+  index: number,
+  draggable: boolean,
+): Marker {
+  const element = document.createElement('div')
+  element.className = draggable ? 'region-vertex' : 'region-vertex fixed'
+  // A click on a handle must not also be a click on the Map, which would add
+  // another corner beneath it.
+  element.addEventListener('click', ev => ev.stopPropagation())
+  const marker = new Marker({element, draggable})
+    .setLngLat([vertex.lng, vertex.lat])
+    .addTo(map)
+  if (draggable) {
+    marker.on('drag', () => {
+      const at = marker.getLngLat().wrap()
+      const draft = regionDraft
+      if (draft) draft.vertices[index] = {lat: at.lat, lng: at.lng}
+      renderRegionShapes()
+    })
+    marker.on('dragend', () => void commitReshape(marker))
+  }
+  return marker
+}
+
+/**
+ * Writes a reshaped polygon as soon as a handle is let go, and puts the ring
+ * back where it was if the write fails, exactly as {@link movePin} does for a
+ * Pin. Membership is geometric, so a Pin the new outline now encloses simply is
+ * in the Region: nothing else is written.
+ */
+async function commitReshape(marker: Marker): Promise<void> {
+  const draft = regionDraft
+  const region = regions.find(r => r.id === draft?.regionId)
+  if (!draft || !region) return
+  const at = marker.getLngLat().wrap()
+  const index = regionVertexMarkers.indexOf(marker)
+  if (index === -1) return
+  draft.vertices[index] = {lat: at.lat, lng: at.lng}
+
+  const rsp = await fetchUpdateRegion({id: region.id, polygon: draft.vertices})
+  if (!rsp) {
+    draft.vertices = region.polygon.map(v => ({...v}))
+    renderRegionDraft()
+    flashStatus('Could not reshape the region.', reshapeInstruction)
+    return
+  }
+  setRegions(regions.map(r => (r.id === rsp.region.id ? rsp.region : r)))
+  render()
+  renderRegions()
+}
+
+/** Done: a reshape is already saved, and a new ring asks for its name. */
+function finishRegionDraft(): void {
+  const draft = regionDraft
+  if (!draft) return
+  if (draft.regionId) {
+    setToolbarFace('main')
+    return
+  }
+  if (draft.vertices.length < RegionVertexMinCount) return
+  openRegionNameDialog()
+}
+
+function openRegionNameDialog(regionId?: string): void {
+  namingRegionId = regionId
+  regionDialogTitle.textContent = regionId
+    ? 'Rename region'
+    : 'Name this region'
+  regionNameInput.value = regions.find(r => r.id === regionId)?.name ?? ''
+  regionDialog.showModal()
+  regionNameInput.focus()
+  regionNameInput.select()
+}
+
+async function saveRegionName(): Promise<void> {
+  const name = regionNameInput.value.trim()
+  if (!name) return
+  regionSaveBtn.disabled = true
+  try {
+    if (namingRegionId) {
+      const rsp = await fetchUpdateRegion({id: namingRegionId, name})
+      if (!rsp) {
+        flashStatus('Could not rename the region.')
+        return
+      }
+      setRegions(regions.map(r => (r.id === rsp.region.id ? rsp.region : r)))
+      regionDialog.close()
+      render()
+      renderRegions()
+      renderRegionsList()
+      return
+    }
+    const draft = regionDraft
+    if (!draft) {
+      regionDialog.close()
+      return
+    }
+    const rsp = await fetchAddRegion({name, polygon: draft.vertices})
+    if (!rsp) {
+      flashStatus('Could not add the region. Try again.')
+      return
+    }
+    setRegions([...regions, rsp.region])
+    regionDialog.close()
+    // Leaving the face is what clears the ring it was tracing.
+    setToolbarFace('main')
+    render()
+    renderRegions()
+    flashStatus(`Added the region "${rsp.region.name}".`)
+  } finally {
+    regionSaveBtn.disabled = false
+  }
+}
+
+function openRegionsDialog(): void {
+  stopDroppingPin()
+  setRegionsNote('')
+  renderRegionsList()
+  regionsDialog.showModal()
+}
+
+/** The list of Regions: swatch, name, how many Pins are in it, and what can be done. */
+function renderRegionsList(): void {
+  regionsList.replaceChildren()
+  regionsEmpty.hidden = regions.length > 0
+  const counts = new Map<string, number>()
+  for (const group of groupPinsByRegion(pins, regions)) {
+    if (group.region) counts.set(group.region.id, group.pins.length)
+  }
+  for (const region of sortRegionsOldestFirst(regions)) {
+    const item = document.createElement('li')
+
+    const swatch = document.createElement('span')
+    swatch.className = 'region-swatch'
+    swatch.style.background =
+      regionColorByName.get(region.name) ?? uncategorizedColor
+    swatch.setAttribute('aria-hidden', 'true')
+
+    const name = document.createElement('span')
+    name.className = 'region-name'
+    name.textContent = region.name
+
+    const count = document.createElement('span')
+    count.className = 'region-count'
+    count.textContent = countLabel(counts.get(region.id) ?? 0)
+
+    item.append(
+      swatch,
+      name,
+      count,
+      regionAction('Reshape', region.name, () => {
+        regionsDialog.close()
+        beginRegionDraft(region.id)
+      }),
+      regionAction('Rename', region.name, () =>
+        openRegionNameDialog(region.id),
+      ),
+      regionAction('Delete', region.name, () => void deleteRegion(region)),
+    )
+    regionsList.append(item)
+  }
+  const full = regions.length >= RegionMaxCount
+  regionsDrawBtn.disabled = full
+  if (full) {
+    setRegionsNote(`A map can have at most ${RegionMaxCount} regions.`)
+  }
+}
+
+function regionAction(
+  label: string,
+  regionName: string,
+  onClick: () => void,
+): HTMLButtonElement {
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.textContent = label
+  button.setAttribute('aria-label', `${label} ${regionName}`)
+  button.addEventListener('click', onClick)
+  return button
+}
+
+function setRegionsNote(text: string): void {
+  regionsNote.textContent = text
+  regionsNote.hidden = !text
+}
+
+/**
+ * Deletes a Region, with no confirmation, as deleting a Pin has none: the Pins
+ * inside it are not touched, since membership was never stored, and drawing it
+ * again puts everything back.
+ */
+async function deleteRegion(region: Region): Promise<void> {
+  const rsp = await fetchDeleteRegion({id: region.id})
+  if (!rsp) {
+    setRegionsNote(`Could not delete "${region.name}". Try again.`)
+    return
+  }
+  setRegions(regions.filter(r => r.id !== region.id))
+  if (activeRegionId === region.id) activeRegionId = undefined
+  render()
+  renderRegions()
+  renderRegionsList()
+  // Nothing left to tour, or nothing that held the camera: back to the whole Map.
+  if (!regions.length) fitToPins(true)
+}
+
 function render(): void {
   // From every Pin, not the visible ones: see {@link categoryColorByName}.
   categoryColorByName = categoryColors(pins)
+  // Membership is worked out here, once, from every Pin and every Region, and
+  // handed to the Sidebar — which stays pure display and never learns what a
+  // polygon is, the way `canEditPin` runs in exactly one place on the client.
+  const membership = regions.length ? groupPinsByRegion(pins, regions) : []
+  regionIdByPin = new Map()
+  for (const group of membership) {
+    if (!group.region) continue
+    for (const pin of group.pins) regionIdByPin.set(pin.id, group.region.id)
+  }
+  if (activeRegionId && !regions.some(r => r.id === activeRegionId)) {
+    activeRegionId = undefined
+  }
+
   const visible = filterPins(pins, activeCategory)
+  const onMap = mapVisiblePins()
   const previouslySelected = selectedPinId
-  selectedPinId = resolveSelection(selectedPinId, visible)
-  renderMarkers(visible)
+  // Resolved against what the Map shows, so that when the tour narrows the Map
+  // a Selected Pin it no longer holds is let go of in both views at once.
+  selectedPinId = resolveSelection(selectedPinId, onMap)
+  renderMarkers(onMap)
+  const shown = new Set(visible.map(pin => pin.id))
   renderSidebar({
     pins: visible,
     selectedPinId,
@@ -489,11 +1096,32 @@ function render(): void {
     // The one place `canEditPin` runs on the client: `sidebar.ts` stays pure
     // display, taking the answer rather than the ingredients that produce it.
     pinCapabilities: new Map(visible.map(pin => [pin.id, pinCapability(pin)])),
+    regionGroups: regions.length
+      ? membership
+          .map(group => ({
+            region: group.region,
+            pins: group.pins.filter(pin => shown.has(pin.id)),
+          }))
+          .filter(group => group.region || group.pins.length)
+      : undefined,
+    regionColors: regionColorByName,
+    activeRegionId,
   })
   showFilterSwatch()
   // Losing the Selected Pin to a filter or a deletion lands in the same place
   // as letting go of it deliberately: the whole Map.
   if (previouslySelected && !selectedPinId) fitToPins(true)
+}
+
+/**
+ * The Pins the Map draws: the Category filter's, and then — while the tour is
+ * on a Region — only that Region's. Composed rather than replaced, so filtering
+ * to Cafes and touring the North Side shows the North Side's cafes.
+ */
+function mapVisiblePins(): Pin[] {
+  const visible = filterPins(pins, activeCategory)
+  if (!activeRegionId) return visible
+  return visible.filter(pin => regionIdByPin.get(pin.id) === activeRegionId)
 }
 
 /**
@@ -504,7 +1132,7 @@ function render(): void {
  * exists — which is how ADR-0007 stays true without a check of its own.
  */
 function renderSummary(): void {
-  const canEdit = canEditSummary(access)
+  const canEdit = canEditMap(access)
   mapSummary.hidden = !summary && !canEdit
   mapSummaryEditBtn.hidden = !canEdit
   mapSummaryEditBtn.textContent = summary ? 'Edit summary' : 'Add a summary'
@@ -563,20 +1191,41 @@ function pinCapability(pin: Pin): PinCapability {
 }
 
 /**
- * Frames every Pin currently shown, which is what the Map loads with and what
- * it returns to whenever nothing is selected. With nothing to frame it falls
- * back to the subreddit's Default Area, and with no area to the whole world the
- * Map was constructed on.
+ * Frames what the Map is showing, which is what it loads with and what it
+ * returns to whenever nothing is selected. That is the Region the tour is on,
+ * where it is on one; otherwise every visible Pin *and* every Region, so a Map
+ * whose Regions reach past its Pins still opens on all of it. With nothing to
+ * frame it falls back to the subreddit's Default Area, and with no area to the
+ * whole world the Map was constructed on.
  */
 function fitToPins(animate: boolean = false): void {
-  const visible = filterPins(pins, activeCategory)
-  const bounds = visible.length ? pinBounds(visible) : areaBounds(defaultArea)
+  const bounds = framing()
   if (!bounds) return
   map.fitBounds(bounds, {
     padding: isPreview ? previewFitPadding : fitPadding,
     maxZoom: 14,
-    duration: animate ? 600 : 0,
+    duration: animate ? animationMs() : 0,
   })
+}
+
+function framing(): LngLatBounds | undefined {
+  const active = regions.find(region => region.id === activeRegionId)
+  if (active) return areaBounds(regionBounds(active))
+
+  const visible = filterPins(pins, activeCategory)
+  let bounds = visible.length ? pinBounds(visible) : undefined
+  for (const region of regions) {
+    const extent = areaBounds(regionBounds(region))
+    if (!extent) continue
+    if (bounds) bounds.extend(extent)
+    else bounds = extent
+  }
+  return bounds ?? areaBounds(defaultArea)
+}
+
+/** How long a flight takes: none, for a reader who has asked for less motion. */
+function animationMs(): number {
+  return matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : flightMs
 }
 
 function pinBounds(visible: readonly Pin[]): LngLatBounds {
@@ -669,6 +1318,15 @@ function refreshMarker(pinId: string): void {
 function selectPin(pinId: string | undefined, source: SelectSource): void {
   const previousId = selectedPinId
   selectedPinId = pinId
+  // A card outside the Region the tour is on was chosen. The Map cannot select
+  // a Pin it is not drawing, so the tour moves to that Pin's Region (or off
+  // Regions, for a Pin in none) rather than leaving the two views to disagree.
+  if (pinId && activeRegionId && regionIdByPin.get(pinId) !== activeRegionId) {
+    activeRegionId = regionIdByPin.get(pinId)
+    renderMarkers(mapVisiblePins())
+    setActiveRegionSection(activeRegionId)
+    renderRegions()
+  }
   // Only the two markers whose appearance changed are rebuilt; the rest of the
   // Map is left alone.
   if (previousId && previousId !== pinId) refreshMarker(previousId)
@@ -719,6 +1377,15 @@ async function movePin(pinId: string, marker: Marker): Promise<void> {
   const rsp = await fetchUpdatePin({id: pinId, location: pin.location})
   if (rsp) {
     pin.location = rsp.pin.location
+    // Membership is geometric, so a Pin dragged across a boundary is in
+    // another Region with nothing to update — but its card has to move there.
+    if (
+      regions.length &&
+      regionIdByPin.get(pin.id) !== regionAtLocation(pin.location, regions)?.id
+    ) {
+      render()
+      scrollPinIntoView(pin.id)
+    }
     return
   }
   pin.location = previousLocation
@@ -781,6 +1448,7 @@ function setToolbarFace(face: ToolbarFace): void {
   toolbarFace = face
   toolbarMain.hidden = face !== 'main'
   toolbarArea.hidden = face !== 'area'
+  toolbarRegion.hidden = face !== 'region'
   toolbarFilter.hidden = face !== 'filter'
 
   // Both modes take the Map over in their own way, and neither survives the
@@ -788,13 +1456,17 @@ function setToolbarFace(face: ToolbarFace): void {
   // instruction the area face wrote over the Map goes with the face.
   if (face !== 'main') stopDroppingPin()
   if (previous === 'area') setStatus('')
+  if (previous === 'region') endRegionDraft()
   if (face === 'area') enterAreaFace()
+  if (face === 'region') enterRegionFace()
 
   // Focus follows the swap, so the keyboard lands on whatever replaced the
   // control it was on rather than falling back to the top of the document.
   if (face === 'area') areaSaveBtn.focus()
+  else if (face === 'region') regionCloseBtn.focus()
   else if (face === 'filter') categoryFilterSelect.focus()
   else if (previous === 'area' && !areaBtn.hidden) areaBtn.focus()
+  else if (previous === 'region' && !regionsBtn.hidden) regionsBtn.focus()
   else if (previous === 'filter' && !filterBtn.hidden) filterBtn.focus()
 }
 
@@ -1154,7 +1826,8 @@ function closeLinkHelp(): void {
 
 /**
  * Opens Import and Export, which are one dialog because they are one idea from
- * either end: the text Export writes is the text Import reads.
+ * either end: the text Export writes is the text Import reads. Both are the
+ * whole Map now — its Pins, its Regions and its Summary. See ADR-0022.
  *
  * On a Solo Map, Export needs no round trip: the Map already holds every Pin
  * it is showing — that is what the Sidebar is drawn from — so the text is
@@ -1177,12 +1850,19 @@ async function openPinsIo(): Promise<void> {
     // round trip.
     const data = await fetchGetMap(false)
     if (data) {
+      // The Regions and the Summary are as stale as the Pins are: a Moderator
+      // may have changed either since this page loaded, and an Export is now
+      // the whole Map.
       pins = data.pins
+      summary = data.summary
+      setRegions(data.regions)
       renderCategoryOptions()
+      renderSummary()
       render()
+      renderRegions()
     }
   }
-  pinsIoExportText.value = formatPinsFile(pins)
+  pinsIoExportText.value = formatMapFile(pins, regions, summary)
   pinsIoImportText.value = ''
   setPinsIoNote('')
   pinsIoDialog.showModal()
@@ -1225,41 +1905,80 @@ async function copyExport(): Promise<void> {
  * not something the Owner can act on — so that case says so plainly instead of
  * inventing a reason, and leaves the text where it is either way.
  */
-async function importPins(): Promise<void> {
-  const read = parsePinsFile(pinsIoImportText.value)
+async function importMap(): Promise<void> {
+  const read = parseMapFile(pinsIoImportText.value)
   if ('error' in read) {
     setPinsIoNote(read.error, true)
     return
   }
 
+  // Pins add; a Summary and Regions replace. It asks exactly when something
+  // would actually be replaced — the file carries one *and* the Map already has
+  // one — so a v1 file, which carries neither, asks nothing, as it always did.
+  const replacing = {
+    summary: read.summary !== undefined && !!summary,
+    regions: read.regions !== undefined ? regions.length : 0,
+  }
+  if (replacing.summary || replacing.regions) {
+    const form = await showForm(importOverwriteForm(replacing))
+    if (form.action !== 'SUBMITTED') return
+  }
+
   pinsIoAddBtn.disabled = true
-  setPinsIoNote(`Adding ${countLabel(read.pins.length)}…`)
-  const rsp = await fetchImportPins({pins: read.pins})
+  setPinsIoNote(`Importing ${countLabel(read.pins.length)}…`)
+  const req: ImportMapReq = {pins: read.pins}
+  if (read.regions !== undefined) req.regions = read.regions
+  if (read.summary !== undefined) req.summary = read.summary
+  const rsp = await fetchImportMap(req)
   pinsIoAddBtn.disabled = false
   if (!rsp) {
-    setPinsIoNote('Those pins could not be added. Try again in a moment.', true)
+    setPinsIoNote('That could not be imported. Try again in a moment.', true)
     return
   }
 
+  // Paints what landed rather than what was sent.
   pins = [...pins, ...rsp.pins]
+  summary = rsp.summary
+  setRegions(rsp.regions)
+  renderSummary()
   renderCategoryOptions()
   // Nothing selected is what frames the whole Map, which is the only view that
   // shows an Owner what they just added alongside what was already there.
   selectedPinId = undefined
   render()
+  renderRegions()
   setSidebarOpen(!isNarrowViewport() && pins.length > 0)
   fitToPins(true)
   pinsIoDialog.close()
-  flashStatus(addedLabel(rsp.pins.length, rsp.droppedImages))
+  flashStatus(importedLabel(rsp))
 }
 
 /** What the Map says once an Import has landed and the dialog has gone. */
-function addedLabel(added: number, droppedImages: number): string {
-  const pinsAdded = `Added ${countLabel(added)}.`
-  if (!droppedImages) return pinsAdded
-  const images =
-    droppedImages === 1 ? 'One image was' : `${droppedImages} images were`
-  return `${pinsAdded} ${images} left out — only images uploaded here can be carried over.`
+function importedLabel(rsp: ImportMapRsp): string {
+  const parts = [`Added ${countLabel(rsp.pins.length)}.`]
+  const {replaced} = rsp
+  if (replaced.summary && replaced.regions) {
+    parts.push(
+      `Replaced the summary and ${regionCountLabel(replaced.regions)}.`,
+    )
+  } else if (replaced.summary) parts.push('Replaced the summary.')
+  else if (replaced.regions) {
+    parts.push(`Replaced ${regionCountLabel(replaced.regions)}.`)
+  }
+  if (rsp.droppedImages) {
+    const images =
+      rsp.droppedImages === 1
+        ? 'One image was'
+        : `${rsp.droppedImages} images were`
+    parts.push(
+      `${images} left out — only images uploaded here can be carried over.`,
+    )
+  }
+  return parts.join(' ')
+}
+
+function regionCountLabel(count: number): string {
+  return count === 1 ? '1 region' : `${count} regions`
 }
 
 function countLabel(count: number): string {
@@ -1351,7 +2070,7 @@ function wireEvents(): void {
   // Wired above the Pin gates below, which it does not answer to: writing a
   // Summary is the Owner's or a Moderator's, and neither of those is what
   // `canReachPinControls` or `ownsMap()` is asking about. See ADR-0020.
-  if (canEditSummary(access)) {
+  if (canEditMap(access)) {
     mapSummaryEditBtn.addEventListener('click', () => openSummaryDialog())
     summaryForm.addEventListener('submit', ev => {
       ev.preventDefault()
@@ -1363,6 +2082,33 @@ function wireEvents(): void {
     summaryClearBtn.addEventListener('click', () => {
       summaryText.value = ''
       void saveSummary()
+    })
+  }
+
+  // Regions answer to the same rule the Summary does — the Map speaking about
+  // itself — so they are wired beside it, ahead of the Pin gates below. See
+  // ADR-0021.
+  if (canEditMap(access)) {
+    regionsBtn.addEventListener('click', () => openRegionsDialog())
+    regionsCloseBtn.addEventListener('click', () => regionsDialog.close())
+    regionsDrawBtn.addEventListener('click', () => {
+      regionsDialog.close()
+      beginRegionDraft()
+    })
+    regionCloseBtn.addEventListener('click', () => setToolbarFace('main'))
+    regionUndoBtn.addEventListener('click', () => undoRegionVertex())
+    regionDoneBtn.addEventListener('click', () => finishRegionDraft())
+    regionForm.addEventListener('submit', ev => {
+      ev.preventDefault()
+      void saveRegionName()
+    })
+    regionCancelBtn.addEventListener('click', () => regionDialog.close())
+    // Escape leaves the tracing face — unless it was pressed to close the name
+    // dialog, which handles it first and must not also throw the ring away.
+    document.addEventListener('keydown', ev => {
+      if (ev.key !== 'Escape' || toolbarFace !== 'region') return
+      if (regionDialog.open) return
+      setToolbarFace('main')
     })
   }
 
@@ -1493,7 +2239,7 @@ function wireEvents(): void {
 
   pinsIoBtn.addEventListener('click', () => void openPinsIo())
   pinsIoCopyBtn.addEventListener('click', () => void copyExport())
-  pinsIoAddBtn.addEventListener('click', () => void importPins())
+  pinsIoAddBtn.addEventListener('click', () => void importMap())
   pinsIoCloseBtn.addEventListener('click', () => pinsIoDialog.close())
   // Escape closes the dialog without passing through Close, so what has to be
   // forgotten hangs off the dialog rather than off that button: a paste left

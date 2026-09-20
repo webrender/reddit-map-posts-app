@@ -1,4 +1,5 @@
-import type {Pin} from '../shared/api.ts'
+import type {Pin, Region} from '../shared/api.ts'
+import {sortRegionsOldestFirst} from './region.ts'
 
 /**
  * The colours a Category can wear, in the order they are handed out.
@@ -80,11 +81,37 @@ export function categoryColors(pins: readonly Pin[]): Map<string, string> {
   const byAge = [...oldest.entries()].sort(([, a], [, b]) =>
     isOlder(a, b) ? -1 : 1,
   )
+  return assignColors(byAge.map(([category]) => category))
+}
 
+/**
+ * Which colour each of a Map's Regions wears, by name — the same rule, from the
+ * same seven colours, as {@link categoryColors}, so adding a Region repaints
+ * none already on the Map. The palette is shared across the two axes on
+ * purpose: a colour identifies within an axis and never across one, and what
+ * tells a Region from a Category is its shape and where it appears, not its
+ * hue. See ADR-0021.
+ *
+ * Two Regions with one name share its colour, as two Pins in one Category do.
+ */
+export function regionColors(regions: readonly Region[]): Map<string, string> {
+  return assignColors(sortRegionsOldestFirst(regions).map(r => r.name))
+}
+
+/**
+ * Walks names oldest first, each taking the colour its name prefers or, where
+ * an older name already holds it, the next one free. Only an older name can
+ * ever displace a younger one, so a name added later — being younger than all
+ * of them — can only take a colour nothing else holds. See ADR-0018.
+ */
+function assignColors(
+  namesOldestFirst: readonly string[],
+): Map<string, string> {
   const colors = new Map<string, string>()
   const taken = new Set<string>()
-  for (const [category] of byAge) {
-    const preferred = hashCategory(category) % categoryPalette.length
+  for (const name of namesOldestFirst) {
+    if (colors.has(name)) continue
+    const preferred = hashCategory(name) % categoryPalette.length
     let color = slot(preferred)
     for (
       let step = 1;
@@ -92,12 +119,12 @@ export function categoryColors(pins: readonly Pin[]): Map<string, string> {
       step++
     )
       color = slot(preferred + step)
-    // Nothing was free, so this Map has more Categories than there are colours
+    // Nothing was free, so this Map has more names than there are colours
     // that can be told apart. It wears the one its name asked for and shares
     // it, which at least keeps the sharing predictable from the name.
     if (taken.has(color)) color = slot(preferred)
     taken.add(color)
-    colors.set(category, color)
+    colors.set(name, color)
   }
   return colors
 }

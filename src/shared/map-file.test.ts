@@ -1,15 +1,19 @@
 import assert from 'node:assert/strict'
 import {test} from 'node:test'
 import type {T2} from '@devvit/web/shared'
-import type {Pin} from './api.ts'
+import type {LatLng, Pin, Region} from './api.ts'
 import {
-  formatPinsFile,
+  formatMapFile,
   isRedditMediaUrl,
+  MapFileVersion,
   PinCategoryMaxLen,
   PinImportMaxCount,
   PinTitleMaxLen,
-  parsePinsFile,
-} from './pins-file.ts'
+  parseMapFile,
+  RegionMaxCount,
+  RegionNameMaxLen,
+  RegionVertexMaxCount,
+} from './map-file.ts'
 
 function pin(over: Partial<Pin> = {}): Pin {
   return {
@@ -22,14 +26,14 @@ function pin(over: Partial<Pin> = {}): Pin {
 
 /** The pins out of a read that was expected to succeed. */
 function read(text: string) {
-  const out = parsePinsFile(text)
+  const out = parseMapFile(text)
   assert.ok(!('error' in out), 'error' in out ? out.error : '')
   return out
 }
 
 /** The message from a read that was expected to fail. */
 function error(text: string): string {
-  const out = parsePinsFile(text)
+  const out = parseMapFile(text)
   assert.ok('error' in out, 'expected a refusal')
   return out.error
 }
@@ -41,7 +45,7 @@ test('round trips every field a Pin has, minus its id', () => {
     link: 'https://example.com/',
     imageUrl: 'https://i.redd.it/abc123.jpg',
   })
-  const out = read(formatPinsFile([original]))
+  const out = read(formatMapFile([original]))
   assert.equal(out.droppedImages, 0)
   assert.deepEqual(out.pins, [
     {
@@ -56,14 +60,16 @@ test('round trips every field a Pin has, minus its id', () => {
 })
 
 test('writes the version, and omits fields a Pin does not have', () => {
-  const file = JSON.parse(formatPinsFile([pin()]))
-  assert.equal(file.version, 1)
+  const file = JSON.parse(formatMapFile([pin()]))
+  assert.equal(file.version, MapFileVersion)
+  assert.equal(file.regions, undefined)
+  assert.equal(file.summary, undefined)
   assert.deepEqual(Object.keys(file.pins[0]), ['title', 'location'])
 })
 
 test('never writes a Contributor’s identity into an Export', () => {
   const authored = pin({authorId: 't2_alice' as T2, author: 'alice'})
-  const file = JSON.parse(formatPinsFile([authored]))
+  const file = JSON.parse(formatMapFile([authored]))
   assert.deepEqual(Object.keys(file.pins[0]), ['title', 'location'])
   assert.equal('authorId' in file.pins[0], false)
   assert.equal('author' in file.pins[0], false)
@@ -73,7 +79,7 @@ test('leaves createdAt out, so an imported Pin is as new as a dropped one', () =
   // ADR-0018 rests on this: a Pin's stamp says when *this* Map got it, so an
   // Export that carried one would let an Import land Pins older than the Map.
   const file = JSON.parse(
-    formatPinsFile([{...pin(), id: 'p1', createdAt: 1_700_000_000_000}]),
+    formatMapFile([{...pin(), id: 'p1', createdAt: 1_700_000_000_000}]),
   )
   assert.ok(!('createdAt' in file.pins[0]), 'an Export named createdAt')
   assert.deepEqual(Object.keys(file.pins[0]), ['title', 'location'])
@@ -231,4 +237,133 @@ test('matches Reddit media hosts whole, never as a substring', () => {
   assert.ok(!isRedditMediaUrl('http://i.redd.it/abc.jpg'))
   assert.ok(!isRedditMediaUrl('data:image/png;base64,AAAA'))
   assert.ok(!isRedditMediaUrl('not a url'))
+})
+
+const triangle: LatLng[] = [
+  {lat: 0, lng: 0},
+  {lat: 0, lng: 1},
+  {lat: 1, lng: 1},
+]
+
+function region(over: Partial<Region> = {}): Region {
+  return {
+    id: 'r1',
+    createdAt: 5,
+    name: 'North Side',
+    polygon: triangle,
+    ...over,
+  }
+}
+
+test('round trips a Summary and Regions, minus a Region’s id and age', () => {
+  const out = read(formatMapFile([pin()], [region()], 'A **city** map.'))
+  assert.equal(out.summary, 'A **city** map.')
+  assert.deepEqual(out.regions, [{name: 'North Side', polygon: triangle}])
+  assert.equal(out.pins.length, 1)
+})
+
+test('writes a Region as an allowlist: name and polygon only', () => {
+  const file = JSON.parse(formatMapFile([pin()], [region()]))
+  assert.deepEqual(Object.keys(file.regions[0]), ['name', 'polygon'])
+})
+
+test('omits the Summary and Regions a Map does not have', () => {
+  const file = JSON.parse(formatMapFile([pin()], [], undefined))
+  assert.ok(!('summary' in file))
+  assert.ok(!('regions' in file))
+})
+
+test('a v1 file and a bare array read as Pins with no Summary and no Regions', () => {
+  for (const text of [
+    '{"version":1,"pins":[{"title":"A","location":{"lat":1,"lng":2}}]}',
+    '[{"title":"A","location":{"lat":1,"lng":2}}]',
+  ]) {
+    const out = read(text)
+    assert.equal(out.pins.length, 1)
+    assert.ok(!('summary' in out), 'a v1 file carries no Summary')
+    assert.ok(!('regions' in out), 'a v1 file carries no Regions')
+  }
+})
+
+test('absent regions and an empty list are different answers', () => {
+  const absent = read('{"pins":[{"title":"A","location":{"lat":1,"lng":2}}]}')
+  assert.equal(absent.regions, undefined)
+  const empty = read(
+    '{"regions":[],"pins":[{"title":"A","location":{"lat":1,"lng":2}}]}',
+  )
+  assert.deepEqual(empty.regions, [])
+})
+
+test('an empty summary says the Map has none, and is not the same as absent', () => {
+  const out = read('{"summary":"  ","pins":[]}')
+  assert.equal(out.summary, '')
+})
+
+test('reads a Map with Regions and no Pins, but not a file with nothing in it', () => {
+  const out = read(
+    JSON.stringify({regions: [{name: 'A', polygon: triangle}], pins: []}),
+  )
+  assert.equal(out.pins.length, 0)
+  assert.equal(out.regions?.length, 1)
+  assert.match(error('{"pins":[]}'), /no pins in it/)
+})
+
+test('refuses a Region with too few or too many points, naming it', () => {
+  const two = JSON.stringify({
+    regions: [{name: 'Line', polygon: triangle.slice(0, 2)}],
+    pins: [],
+  })
+  assert.match(error(two), /Region 1 \("Line"\) needs between 3 and 200 points/)
+  const many = JSON.stringify({
+    regions: [
+      {
+        name: 'Blob',
+        polygon: Array.from(
+          {length: RegionVertexMaxCount + 1},
+          () => triangle[0],
+        ),
+      },
+    ],
+    pins: [],
+  })
+  assert.match(error(many), /Region 1 \("Blob"\) needs between/)
+})
+
+test('refuses a Region with a bad vertex, a bad name, or a long name', () => {
+  const bad = JSON.stringify({
+    regions: [
+      {name: 'Ok', polygon: triangle},
+      {name: 'Bad', polygon: [...triangle.slice(0, 2), {lat: 91, lng: 0}]},
+    ],
+    pins: [],
+  })
+  assert.match(
+    error(bad),
+    /Region 2 \("Bad"\) has an invalid location at point 3/,
+  )
+  const nameless = JSON.stringify({regions: [{polygon: triangle}], pins: []})
+  assert.match(error(nameless), /Region 1 has no name/)
+  const long = JSON.stringify({
+    regions: [{name: 'x'.repeat(RegionNameMaxLen + 1), polygon: triangle}],
+    pins: [],
+  })
+  assert.match(error(long), /no name, or one longer than 60/)
+})
+
+test('refuses more Regions than a Map may hold', () => {
+  const regions = Array.from({length: RegionMaxCount + 1}, (_, i) => ({
+    name: `R${i}`,
+    polygon: triangle,
+  }))
+  assert.match(error(JSON.stringify({regions, pins: []})), /24 is the most/)
+})
+
+test('refuses a regions value that is not a list, and a summary that is not text', () => {
+  assert.match(error('{"regions":{},"pins":[]}'), /not a list/)
+  assert.match(error('{"summary":3,"pins":[]}'), /summary is not text/)
+})
+
+test('refuses a Summary over its ceiling', () => {
+  const text = JSON.stringify({summary: 'x'.repeat(4001), pins: []})
+  assert.match(error(text), /longer than 4000/)
 })

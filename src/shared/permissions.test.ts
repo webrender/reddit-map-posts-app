@@ -4,8 +4,8 @@ import type {T2} from '@devvit/web/shared'
 import type {Pin} from './api.ts'
 import {
   canAddPin,
+  canEditMap,
   canEditPin,
-  canEditSummary,
   type MapAccess,
   pinAuthorId,
 } from './permissions.ts'
@@ -138,12 +138,12 @@ test('canEditPin: exhaustive over collaborative × moderator × who is asking ×
 })
 
 /**
- * Exhaustive over what `canEditSummary` promises, and deliberately asserting
+ * Exhaustive over what `canEditMap` promises, and deliberately asserting
  * the two rows where it parts company with `canEditPin`: a Moderator gets
  * nothing on a Solo Map, and the Owner keeps the Summary on a Collaborative one
  * even though they have no power over its Pins. See ADR-0020.
  */
-test('canEditSummary: exhaustive over collaborative × moderator × who is asking', () => {
+test('canEditMap: exhaustive over collaborative × moderator × who is asking', () => {
   const cases: [
     collaborative: boolean,
     isModerator: boolean,
@@ -173,7 +173,7 @@ test('canEditSummary: exhaustive over collaborative × moderator × who is askin
 
   for (const [collaborative, isModerator, userId, expected] of cases) {
     assert.equal(
-      canEditSummary(access({collaborative, isModerator, userId})),
+      canEditMap(access({collaborative, isModerator, userId})),
       expected,
       `collaborative=${collaborative} isModerator=${isModerator} userId=${userId}`,
     )
