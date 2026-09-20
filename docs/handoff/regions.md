@@ -1,6 +1,8 @@
 # Handoff — Regions
 
-**Status:** designed, not started. No code written.
+**Status:** implemented on the `regions` branch and passing `npm test`, but not yet
+exercised in a browser or committed. §12's tour uses a scroll-time geometry read
+rather than an `IntersectionObserver` (see ADR-0021).
 **Delete this file once the work has shipped.**
 **Branch:** `regions`, cut from `main` (`c8dfbb7`) — this document is its first
 commit, so the implementation continues on the branch it is already on.

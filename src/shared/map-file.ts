@@ -1,12 +1,23 @@
-import {isLatLng, type LatLng, type Pin} from './api.ts'
+import {
+  isLatLng,
+  type LatLng,
+  MapSummaryMaxLen,
+  type Pin,
+  type Region,
+} from './api.ts'
 
 /**
  * The shape of an Export, bumped only when a reader of this version could
  * misread a later one. Import checks it loosely — an unknown version is read
  * anyway, since every field it does understand still means what it says — and
  * it is here so that a future format which *does* break can say so.
+ *
+ * 2 is the version that added the Summary and Regions. A version 1 file and a
+ * bare array of Pins both still read, as Pins with no Summary and no Regions —
+ * which is most of what is in the wild, and what makes an Import that asks for
+ * no confirmation the common one. See ADR-0022.
  */
-export const PinsFileVersion = 1
+export const MapFileVersion = 2
 
 /**
  * How many Pins one Import may carry. A Map has never had a ceiling because a
@@ -24,6 +35,17 @@ export const PinTitleMaxLen = 200
 export const PinCategoryMaxLen = 60
 export const PinDescriptionMaxLen = 2000
 export const PinLinkMaxLen = 2000
+
+/**
+ * Ceilings on a Region, for the reason the Pin ones exist: an Import is the
+ * first Region text this app did not watch someone draw. Enforced in the shared
+ * reader and in the server's normalizers alike, so the typed path and the
+ * pasted one cannot disagree about what a Region may hold.
+ */
+export const RegionNameMaxLen = 60
+export const RegionMaxCount = 24
+export const RegionVertexMaxCount = 200
+export const RegionVertexMinCount = 3
 
 /**
  * One Pin as an Export writes it: everything a Pin has except its id, which
@@ -44,24 +66,59 @@ export type PinExport = {
   imageUrl?: string
 }
 
-/** An Export, as {@link formatPinsFile} writes it. */
-export type PinsFile = {version: number; pins: PinExport[]}
+/**
+ * One Region as an Export writes it: its name and its ring, and nothing else.
+ * No id, which belongs to the Map holding the Region rather than to the
+ * Region's account of itself, and no `createdAt`, so an imported Region is
+ * stamped fresh where it lands and its colour is re-derived there. See
+ * ADR-0018 and ADR-0022.
+ */
+export type RegionExport = {name: string; polygon: LatLng[]}
 
-/** What {@link parsePinsFile} makes of some text. */
-export type PinsFileRead =
-  | {pins: PinExport[]; droppedImages: number}
+/**
+ * An Export, as {@link formatMapFile} writes it. `summary` and `regions` are
+ * absent where the Map has none, and *absent means something*: a file with no
+ * `regions` leaves the Map's Regions alone on Import, and a file with
+ * `"regions": []` clears them. The writer only ever omits, so an Export of a
+ * Map with nothing to say never destroys anything on its way back in.
+ */
+export type MapFile = {
+  version: number
+  summary?: string
+  regions?: RegionExport[]
+  pins: PinExport[]
+}
+
+/**
+ * What {@link parseMapFile} makes of some text. `summary` and `regions` are
+ * present only where the file carried them — see {@link MapFile} for why
+ * absent and empty are different answers.
+ */
+export type MapFileRead =
+  | {
+      pins: PinExport[]
+      droppedImages: number
+      summary?: string
+      regions?: RegionExport[]
+    }
   | {error: string}
 
 /**
- * Every Pin on a Map as the text an Owner copies out. Pretty-printed on
- * purpose: an Export is something a person opens in an editor and changes by
- * hand, and a single line of JSON is not.
+ * A whole Map as the text an Owner copies out: its Pins, its Regions and its
+ * Summary. Pretty-printed on purpose: an Export is something a person opens in
+ * an editor and changes by hand, and a single line of JSON is not.
  */
-export function formatPinsFile(pins: readonly Pin[]): string {
-  const file: PinsFile = {
-    version: PinsFileVersion,
+export function formatMapFile(
+  pins: readonly Pin[],
+  regions: readonly Region[] = [],
+  summary?: string,
+): string {
+  const file: MapFile = {
+    version: MapFileVersion,
     pins: pins.map(toPinExport),
   }
+  if (summary) file.summary = summary
+  if (regions.length) file.regions = regions.map(toRegionExport)
   return `${JSON.stringify(file, undefined, 2)}\n`
 }
 
@@ -76,7 +133,7 @@ export function formatPinsFile(pins: readonly Pin[]): string {
  * bare array is read as the pins, and unknown fields are ignored, so text
  * written by hand or by a later version of this app still works.
  */
-export function parsePinsFile(text: string): PinsFileRead {
+export function parseMapFile(text: string): MapFileRead {
   if (!text.trim()) return {error: 'Paste an export first.'}
 
   let value: unknown
@@ -87,7 +144,7 @@ export function parsePinsFile(text: string): PinsFileRead {
       error: 'That is not JSON. Paste the whole export, including the {}.',
     }
   }
-  return readPinsValue(value)
+  return readMapValue(value)
 }
 
 /**
@@ -96,11 +153,12 @@ export function parsePinsFile(text: string): PinsFileRead {
  * ends go through this, so the client's refusal and the server's are the same
  * refusal rather than two that can drift apart.
  */
-export function readPinsValue(value: unknown): PinsFileRead {
-  const list = readPinList(value)
-  if (!list) {
+export function readMapValue(value: unknown): MapFileRead {
+  const envelope = readEnvelope(value)
+  if (!envelope) {
     return {error: 'That JSON is not an export: it has no list of pins in it.'}
   }
+  const list = envelope.pins
   if (list.length > PinImportMaxCount) {
     return {
       error: `That is ${list.length} pins; ${PinImportMaxCount} is the most one import can add.`,
@@ -115,8 +173,27 @@ export function readPinsValue(value: unknown): PinsFileRead {
     if (read.droppedImage) droppedImages++
     pins.push(read.pin)
   }
-  if (!pins.length) return {error: 'That export has no pins in it.'}
-  return {pins, droppedImages}
+
+  const out: MapFileRead = {pins, droppedImages}
+
+  if (envelope.regions !== undefined) {
+    const regions = readRegions(envelope.regions)
+    if ('error' in regions) return regions
+    out.regions = regions.regions
+  }
+
+  if (envelope.summary !== undefined) {
+    const summary = readSummary(envelope.summary)
+    if (typeof summary === 'object') return summary
+    out.summary = summary
+  }
+
+  // A file that carries a Summary or Regions but no Pins is a real Export of a
+  // Map that has none yet; a file that carries nothing at all is not one.
+  if (!pins.length && out.regions === undefined && out.summary === undefined) {
+    return {error: 'That export has no pins in it.'}
+  }
+  return out
 }
 
 /**
@@ -166,12 +243,111 @@ function toPinExport(pin: Pin): PinExport {
   return out
 }
 
-/** The pins out of either envelope: `{pins: [...]}` or a bare `[...]`. */
-function readPinList(value: unknown): unknown[] | undefined {
-  if (Array.isArray(value)) return value
+/**
+ * The parts out of either envelope: `{pins, regions?, summary?}` or a bare
+ * `[...]` of Pins. An object may leave `pins` out only if it carries a Summary
+ * or Regions, which is what a Map with no Pins yet exports as.
+ */
+function readEnvelope(
+  value: unknown,
+): {pins: unknown[]; regions?: unknown; summary?: unknown} | undefined {
+  if (Array.isArray(value)) return {pins: value}
   if (typeof value !== 'object' || value === null) return
-  const {pins} = value as {pins?: unknown}
-  return Array.isArray(pins) ? pins : undefined
+  const {pins, regions, summary} = value as {
+    pins?: unknown
+    regions?: unknown
+    summary?: unknown
+  }
+  if (pins === undefined) {
+    if (regions === undefined && summary === undefined) return
+    return {pins: [], regions, summary}
+  }
+  if (!Array.isArray(pins)) return
+  return {pins, regions, summary}
+}
+
+/**
+ * A Region as an Export describes it, from an allowlist for `toPinExport`'s
+ * reason: `name` and `polygon`, so that nothing `Region` grows later leaks into
+ * a file merely by being there.
+ */
+function toRegionExport(region: Region): RegionExport {
+  return {name: region.name, polygon: region.polygon}
+}
+
+type RegionsRead = {regions: RegionExport[]} | {error: string}
+
+/** Every Region in the file, checked before any is accepted. */
+function readRegions(value: unknown): RegionsRead {
+  if (!Array.isArray(value)) {
+    return {error: 'The regions in that export are not a list.'}
+  }
+  if (value.length > RegionMaxCount) {
+    return {
+      error: `That is ${value.length} regions; ${RegionMaxCount} is the most a map can hold.`,
+    }
+  }
+  const regions: RegionExport[] = []
+  for (const [index, entry] of value.entries()) {
+    const read = readRegion(entry, index)
+    if ('error' in read) return read
+    regions.push(read.region)
+  }
+  return {regions}
+}
+
+function readRegion(
+  value: unknown,
+  index: number,
+): {region: RegionExport} | {error: string} {
+  const at = `Region ${index + 1}`
+  if (typeof value !== 'object' || value === null) {
+    return {error: `${at} is not a region.`}
+  }
+  const entry = value as Record<string, unknown>
+
+  const name = readText(entry.name, RegionNameMaxLen)
+  if (name === undefined) {
+    return {
+      error: `${at} has no name, or one longer than ${RegionNameMaxLen} characters.`,
+    }
+  }
+  const polygon = entry.polygon
+  if (
+    !Array.isArray(polygon) ||
+    polygon.length < RegionVertexMinCount ||
+    polygon.length > RegionVertexMaxCount
+  ) {
+    return {
+      error: `${at} ("${name}") needs between ${RegionVertexMinCount} and ${RegionVertexMaxCount} points.`,
+    }
+  }
+  const vertices: LatLng[] = []
+  for (const [vertex, point] of polygon.entries()) {
+    if (!isLatLng(point)) {
+      return {
+        error: `${at} ("${name}") has an invalid location at point ${vertex + 1}.`,
+      }
+    }
+    vertices.push({lat: point.lat, lng: point.lng})
+  }
+  return {region: {name, polygon: vertices}}
+}
+
+/**
+ * The Summary in a file: trimmed, and possibly empty, which says the Map has
+ * none. Anything that is not a string, or is over its ceiling, is refused
+ * rather than silently truncated.
+ */
+function readSummary(value: unknown): string | {error: string} {
+  if (typeof value !== 'string') return {error: 'The summary is not text.'}
+  const trimmed = value.trim()
+  if (trimmed.length > MapSummaryMaxLen) {
+    return {
+      error: `The summary is longer than ${MapSummaryMaxLen} characters.`,
+    }
+  }
+  return trimmed
 }
 
 type PinRead = {pin: PinExport; droppedImage: boolean} | {error: string}

@@ -1,6 +1,7 @@
 import type {Pin} from '../shared/api.ts'
 import {pinColor, uncategorizedColor} from './category-color.ts'
 import {renderMarkdown} from './markdown.ts'
+import type {RegionGroup} from './region.ts'
 
 /** A run of Pins sharing a Category, or the uncategorized run. */
 export type PinGroup = {
@@ -77,6 +78,18 @@ export type SidebarHandlers = {
   onOpenLink(url: string): void
   /** The Sidebar opened or closed, changing how much room the Map has. */
   onToggle(open: boolean): void
+  /**
+   * A Region's heading was clicked; `undefined` for the Elsewhere heading,
+   * which stands for no Region at all.
+   */
+  onSelectRegion(regionId: string | undefined): void
+  /**
+   * The reader's own scrolling brought a different Region's section to the top
+   * of the Sidebar, or scrolled back above all of them (`undefined`). Only ever
+   * raised for a scroll the reader made, on a wide viewport: see
+   * {@link initSidebar}.
+   */
+  onActiveRegionChange(regionId: string | undefined): void
 }
 
 /**
@@ -111,11 +124,41 @@ export type SidebarState = {
   categoryColors: Map<string, string>
   /** Every visible Pin's id to what its card may offer. */
   pinCapabilities: Map<string, PinCapability>
+  /**
+   * The visible Pins grouped by Region, oldest Region first and the Pins in none
+   * last — worked out once in `render()` and passed in, so this module stays
+   * pure display and never learns what a polygon is. `undefined` where the Map
+   * has no Regions, which is the whole compatibility story: the output is then
+   * exactly what it was before Regions existed. See ADR-0021.
+   */
+  regionGroups: RegionGroup[] | undefined
+  /** Every Region's name to its colour — the whole Map's, as for Categories. */
+  regionColors: Map<string, string>
+  /** The Region the tour has reached, if it has reached one. */
+  activeRegionId: string | undefined
 }
 
 const uncategorizedHeading = 'Uncategorized'
 
+/** The heading over the Pins that are in no Region, when there are Regions to be outside of. */
+const elsewhereHeading = 'Elsewhere'
+
+/**
+ * How long the tour ignores scrolling after the app itself has scrolled the
+ * Sidebar or rebuilt it. `scrollPinIntoView` runs after a save, after an edit
+ * and on selecting a marker, all smoothly, and each would otherwise be read as
+ * the reader steering the tour and yank the camera somewhere they never asked to
+ * go.
+ */
+const tourSuppressMs = 700
+
+/** Where in the Sidebar a Region's section has to reach to become the active one: the top 40%. */
+const tourBand = 0.4
+
 let listEl: HTMLElement
+let sidebarEl: HTMLElement
+let tourFrame: number | undefined
+let suppressTourUntil = 0
 let toggleEl: HTMLButtonElement
 let handlers: SidebarHandlers
 let open = false
@@ -124,6 +167,8 @@ let pinCount = 0
 export function initSidebar(sidebarHandlers: SidebarHandlers): void {
   handlers = sidebarHandlers
   listEl = document.getElementById('pin-list') as HTMLElement
+  sidebarEl = document.getElementById('sidebar') as HTMLElement
+  sidebarEl.addEventListener('scroll', onSidebarScroll, {passive: true})
   toggleEl = document.getElementById('sidebar-toggle') as HTMLButtonElement
   toggleEl.addEventListener('click', () => setSidebarOpen(!open))
   labelToggle()
@@ -141,6 +186,53 @@ function labelToggle(): void {
     'aria-label',
     `${open ? 'Hide' : 'Show'} pins (${pinCount})`,
   )
+}
+
+function suppressTour(): void {
+  suppressTourUntil = performance.now() + tourSuppressMs
+}
+
+/**
+ * The tour. Only a scroll the reader made reaches it — one that follows the
+ * app's own scrolling or rebuilding by less than {@link tourSuppressMs} is not
+ * theirs — and only on a wide viewport: below 640px the Sidebar overlays 85% of
+ * the Map, so a camera move nobody can see would leave the Map somewhere else by
+ * the time the panel is dismissed. It is re-asked on every scroll rather than
+ * decided once, so a resize is followed for free.
+ *
+ * Nothing is computed before the first such scroll, which is what keeps the
+ * landing state — every polygon and every Pin — from being destroyed on first
+ * paint. That is the property an IntersectionObserver would have to be told to
+ * ignore its first callback to keep, since it reports on `observe()`; reading
+ * the geometry on a scroll has no first callback to ignore.
+ */
+function onSidebarScroll(): void {
+  if (performance.now() < suppressTourUntil) return
+  if (isNarrowViewport()) return
+  if (tourFrame !== undefined) return
+  tourFrame = requestAnimationFrame(() => {
+    tourFrame = undefined
+    handlers.onActiveRegionChange(regionAtTop())
+  })
+}
+
+/**
+ * The Region whose section is topmost within the top {@link tourBand} of the
+ * Sidebar, or none: above every section (the Summary, or the very top of the
+ * list) the whole Map is the answer, and so it is at Elsewhere, which stands for
+ * no Region.
+ */
+function regionAtTop(): string | undefined {
+  if (sidebarEl.scrollTop <= 0) return undefined
+  const root = sidebarEl.getBoundingClientRect()
+  const edge = root.top + root.height * tourBand
+  for (const section of listEl.querySelectorAll<HTMLElement>(
+    '.region-group[data-region-id]',
+  )) {
+    const box = section.getBoundingClientRect()
+    if (box.bottom > root.top && box.top < edge) return section.dataset.regionId
+  }
+  return undefined
 }
 
 /** Below this the Sidebar overlays the Map instead of taking a column of it. */
@@ -164,14 +256,73 @@ export function setSidebarOpen(next: boolean): void {
 export function renderSidebar(state: SidebarState): void {
   pinCount = state.pins.length
   labelToggle()
+  suppressTour()
   listEl.replaceChildren()
 
-  if (!state.pins.length) {
+  // With Regions there is always something to list: a Region with no Pins yet
+  // still has its heading.
+  if (!state.pins.length && !state.regionGroups?.some(g => g.region)) {
     listEl.append(emptyMessage(state))
     return
   }
 
-  const groups = groupPinsByCategory(state.pins)
+  if (!state.regionGroups) {
+    appendPinGroups(listEl, state.pins, state)
+    return
+  }
+
+  for (const group of state.regionGroups) {
+    const {region} = group
+    const section = document.createElement('section')
+    section.className =
+      region && region.id === state.activeRegionId
+        ? 'region-group active'
+        : 'region-group'
+    if (region) section.dataset.regionId = region.id
+
+    const heading = document.createElement('h2')
+    heading.className = 'region-group-heading'
+    heading.tabIndex = 0
+    const name = document.createElement('span')
+    name.textContent = region?.name ?? elsewhereHeading
+    const count = document.createElement('span')
+    count.className = 'region-group-count'
+    count.textContent = `${group.pins.length}`
+    heading.append(
+      regionSwatch(
+        region
+          ? (state.regionColors.get(region.name) ?? uncategorizedColor)
+          : uncategorizedColor,
+      ),
+      name,
+      count,
+    )
+    const regionId = region?.id
+    heading.addEventListener('click', () => handlers.onSelectRegion(regionId))
+    heading.addEventListener('keydown', ev => {
+      if (ev.key !== 'Enter' && ev.key !== ' ') return
+      ev.preventDefault()
+      handlers.onSelectRegion(regionId)
+    })
+    section.append(heading)
+
+    if (group.pins.length) appendPinGroups(section, group.pins, state)
+    else section.append(emptyRegionMessage(state))
+    listEl.append(section)
+  }
+}
+
+/**
+ * The Category grouping, into whatever holds it: the list itself where the Map
+ * has no Regions, and one Region's section where it has. Called once per Region,
+ * `groupPinsByCategory` and `showsHeadings` untouched.
+ */
+function appendPinGroups(
+  into: HTMLElement,
+  pins: Pin[],
+  state: SidebarState,
+): void {
+  const groups = groupPinsByCategory(pins)
   const headings = showsHeadings(groups)
   for (const group of groups) {
     const section = document.createElement('section')
@@ -204,7 +355,7 @@ export function renderSidebar(state: SidebarState): void {
         ),
       )
     }
-    listEl.append(section)
+    into.append(section)
   }
 }
 
@@ -221,7 +372,47 @@ export function setSelectedCard(selectedPinId: string | undefined): void {
 
 export function scrollPinIntoView(pinId: string): void {
   const card = listEl.querySelector(`[data-pin-id="${CSS.escape(pinId)}"]`)
-  card?.scrollIntoView({behavior: 'smooth', block: 'nearest'})
+  if (!card) return
+  suppressTour()
+  card.scrollIntoView({behavior: 'smooth', block: 'nearest'})
+}
+
+/**
+ * Scrolls a Region's section to the top, for a click on its polygon or its
+ * label. Like {@link scrollPinIntoView} it is the app scrolling, not the reader,
+ * and the tour is told so.
+ */
+export function scrollRegionIntoView(regionId: string): void {
+  const section = listEl.querySelector(
+    `[data-region-id="${CSS.escape(regionId)}"]`,
+  )
+  if (!section) return
+  suppressTour()
+  section.scrollIntoView({behavior: 'smooth', block: 'start'})
+}
+
+/**
+ * Repaints which Region is active without rebuilding the list, for the reason
+ * {@link setSelectedCard} does not rebuild it: the tour moves on every few
+ * hundred pixels of scroll, and a rebuild would throw away the position the
+ * reader is scrolling from.
+ */
+export function setActiveRegionSection(regionId: string | undefined): void {
+  for (const section of listEl.querySelectorAll<HTMLElement>('.region-group')) {
+    section.classList.toggle(
+      'active',
+      regionId !== undefined && section.dataset.regionId === regionId,
+    )
+  }
+}
+
+function emptyRegionMessage(state: SidebarState): HTMLElement {
+  const message = document.createElement('p')
+  message.className = 'region-group-empty'
+  message.textContent = state.filtered
+    ? 'No pins in this category.'
+    : 'No pins in this region yet.'
+  return message
 }
 
 function emptyMessage(state: SidebarState): HTMLElement {
@@ -275,6 +466,19 @@ function swatch(color: string): HTMLElement {
   dot.style.background = color
   dot.setAttribute('aria-hidden', 'true')
   return dot
+}
+
+/**
+ * The Region's counterpart to {@link swatch}, and squared off where that is
+ * round: a colour identifies within an axis and never across one, and it is the
+ * shape that says which axis this is. See ADR-0021.
+ */
+function regionSwatch(color: string): HTMLElement {
+  const square = document.createElement('span')
+  square.className = 'region-swatch'
+  square.style.background = color
+  square.setAttribute('aria-hidden', 'true')
+  return square
 }
 
 function pinCard(

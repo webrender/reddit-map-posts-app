@@ -50,6 +50,8 @@ also keeps `markdown.ts` free of app knowledge, the way `sidebar.ts` is kept
 pure display. This is the part most likely to be "simplified" into a plain
 anchor by someone testing in a browser, where it appears to work.
 
+**Superseded by ADR-0022: an Export now carries the Summary, and an Import replaces it behind a confirmation. What follows is the reasoning as it stood.**
+
 **An Export does not carry the Summary, and must not learn to.** Adding a field
 to `PinsFile` is the obvious completeness move and it breaks the promise Import
 rests on: `CONTEXT.md` says an Import *"only ever adds: what is already on the

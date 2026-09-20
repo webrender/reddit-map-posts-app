@@ -11,6 +11,8 @@ import type {
 import {
   type AddPinReq,
   type AddPinRsp,
+  type AddRegionReq,
+  type AddRegionRsp,
   type ClearDefaultAreaRsp,
   type CreateMapPostReq,
   type CreateMapPostRsp,
@@ -18,6 +20,8 @@ import {
   type DeletePinReq,
   type DeletePinRsp,
   type DeletePostRsp,
+  type DeleteRegionReq,
+  type DeleteRegionRsp,
   defaultIndexPostTitle,
   defaultMapPostTitle,
   Endpoint,
@@ -26,8 +30,8 @@ import {
   type GetIndexRsp,
   GetMapFullParam,
   type GetMapRsp,
-  type ImportPinsReq,
-  type ImportPinsRsp,
+  type ImportMapReq,
+  type ImportMapRsp,
   type IndexEntry,
   IndexPageSize,
   IndexPostFormName,
@@ -47,19 +51,16 @@ import {
   newPostForm,
   type Pin,
   PostTitleMaxLen,
+  type Region,
   type SetDefaultAreaReq,
   type SetDefaultAreaRsp,
   type SetSummaryReq,
   type SetSummaryRsp,
   type UpdatePinReq,
   type UpdatePinRsp,
+  type UpdateRegionReq,
+  type UpdateRegionRsp,
 } from '../shared/api.ts'
-import {
-  canAddPin,
-  canEditPin,
-  canEditSummary,
-  type MapAccess,
-} from '../shared/permissions.ts'
 import {
   isRedditMediaUrl,
   PinCategoryMaxLen,
@@ -67,17 +68,29 @@ import {
   type PinExport,
   PinLinkMaxLen,
   PinTitleMaxLen,
-  readPinsValue,
-} from '../shared/pins-file.ts'
+  type RegionExport,
+  RegionNameMaxLen,
+  RegionVertexMaxCount,
+  RegionVertexMinCount,
+  readMapValue,
+} from '../shared/map-file.ts'
+import {
+  canAddPin,
+  canEditMap,
+  canEditPin,
+  type MapAccess,
+} from '../shared/permissions.ts'
 import {
   dbAddPin,
   dbAddPins,
+  dbAddRegion,
   dbClearIndexMiss,
   dbClearSummary,
   dbCreateMap,
   dbDeleteDefaultArea,
   dbDeleteMap,
   dbDeletePin,
+  dbDeleteRegion,
   dbGetDefaultArea,
   dbGetIndex,
   dbGetIndexMisses,
@@ -87,12 +100,14 @@ import {
   dbGetScoreCursor,
   dbIsMap,
   dbRecordIndexMiss,
+  dbReplaceRegions,
   dbSetCachedScores,
   dbSetDefaultArea,
   dbSetScoreCursor,
   dbSetSummary,
   dbUnlistMap,
   dbUpdatePin,
+  dbUpdateRegion,
   type IndexRow,
   type MapData,
 } from './db.ts'
@@ -134,7 +149,10 @@ type AnyRsp =
   | AddPinRsp
   | UpdatePinRsp
   | DeletePinRsp
-  | ImportPinsRsp
+  | ImportMapRsp
+  | AddRegionRsp
+  | UpdateRegionRsp
+  | DeleteRegionRsp
   | DeletePostRsp
   | DeleteIndexPostRsp
   | SetDefaultAreaRsp
@@ -200,8 +218,17 @@ async function route(
       case Endpoint.DeletePin:
         rsp = await routeDeletePin(reqMsg)
         break
-      case Endpoint.ImportPins:
-        rsp = await routeImportPins(reqMsg)
+      case Endpoint.ImportMap:
+        rsp = await routeImportMap(reqMsg)
+        break
+      case Endpoint.AddRegion:
+        rsp = await routeAddRegion(reqMsg)
+        break
+      case Endpoint.UpdateRegion:
+        rsp = await routeUpdateRegion(reqMsg)
+        break
+      case Endpoint.DeleteRegion:
+        rsp = await routeDeleteRegion(reqMsg)
         break
       case Endpoint.SetDefaultArea:
         rsp = await routeSetDefaultArea(reqMsg)
@@ -272,6 +299,7 @@ async function routeGetMap(searchParams: URLSearchParams): Promise<GetMapRsp> {
     isOwner: map.ownerId === context.userId,
     collaborative: map.collaborative,
     isModerator: moderator,
+    regions: map.regions,
   }
   if (defaultArea) rsp.defaultArea = defaultArea
   if (map.summary) rsp.summary = map.summary
@@ -358,39 +386,80 @@ async function routeDeletePin(reqMsg: IncomingMessage): Promise<DeletePinRsp> {
 }
 
 /**
- * Adds a whole Export's worth of Pins at once. Owner-only on both kinds of
- * Map — a Contributor's whole gesture is Pin Drop plus editing what they
- * dropped, and Import is a 500-Pin bulk add, a flooding vector this app does
- * not open to anyone but the Owner even on a Collaborative Map.
+ * Applies an Export: its Pins are added, and its Summary and Regions replace
+ * what the Map has, each only where the file carries it. Owner-only on both
+ * kinds of Map — a Contributor's whole gesture is Pin Drop plus editing what
+ * they dropped, and Import is a 500-Pin bulk add and a whole-Map overwrite, a
+ * flooding vector this app does not open to anyone but the Owner even on a
+ * Collaborative Map. A Moderator may write a Region by hand but may not
+ * replace all of them from a paste.
  *
  * Every entry is checked before any of them is written. An Import that applied
- * most of itself would leave the Owner with no clean retry: Import only ever
- * adds, so running it again after a fix would duplicate whatever had already
- * landed. All of it or none of it is the only shape that can be tried twice.
+ * most of itself would leave the Owner with no clean retry: its Pins add, so
+ * running it again after a fix would duplicate whatever had already landed. All
+ * of it or none of it is the only shape that can be tried twice.
+ *
+ * Absent and empty mean different things, and getting it wrong erases a Map's
+ * Regions on every v1 import: a body with no `regions` leaves them alone, and
+ * `"regions": []` clears them. `summary: ''` draws the same line against an
+ * absent `summary`. See ADR-0022.
  *
  * Nothing here reads a URL for a Location. A Pin's Location arrives as two
  * numbers or the entry is refused, which is what keeps ADR-0015's rule — the
  * app never takes a list of links — true of a route that takes a list. See
  * ADR-0017.
  */
-async function routeImportPins(
-  reqMsg: IncomingMessage,
-): Promise<ImportPinsRsp> {
+async function routeImportMap(reqMsg: IncomingMessage): Promise<ImportMapRsp> {
   const t3 = requirePostId()
   const map = await requireOwnedMap(t3)
-  const req = await readJson<ImportPinsReq>(reqMsg)
+  const req = await readJson<ImportMapReq>(reqMsg)
 
   // The client has already read the Owner's text with this same reader, and is
   // asked again here for the reason every route asks: what arrives is a body,
   // not a promise.
-  const read = readPinsValue(req)
+  const read = readMapValue(req)
   if ('error' in read) throw new HttpError(400, read.error)
 
+  // Everything that can refuse does so before the first write.
   // Stamped to the importing Owner, on both kinds of Map — Import is
   // Owner-only, so there is only ever one Contributor it could mean.
   const pins = read.pins.map(entry => toPin(entry, map.ownerId, map.ownerName))
+  const regions = read.regions?.map(toRegion)
+  const summary =
+    read.summary === undefined ? undefined : normalizeSummary(read.summary)
+
   await dbAddPins(t3, pins)
-  return {pins, droppedImages: read.droppedImages}
+  if (regions) await dbReplaceRegions(t3, regions)
+  if (summary === '') await dbClearSummary(t3)
+  else if (summary !== undefined) await dbSetSummary(t3, summary)
+
+  const rsp: ImportMapRsp = {
+    pins,
+    droppedImages: read.droppedImages,
+    regions: regions ?? map.regions,
+    replaced: {
+      summary: summary !== undefined && !!map.summary,
+      regions: regions ? map.regions.length : 0,
+    },
+  }
+  const landed = summary === undefined ? map.summary : summary
+  if (landed) rsp.summary = landed
+  return rsp
+}
+
+/**
+ * One imported Region as a stored one. The id and `createdAt` are the
+ * server's, for a Pin's reason: an Export describes Regions rather than naming
+ * them, and an imported one is stamped where it lands so its colour is
+ * re-derived there. See ADR-0018.
+ */
+function toRegion(entry: RegionExport): Region {
+  return {
+    id: crypto.randomUUID(),
+    createdAt: Date.now(),
+    name: normalizeRegionName(entry.name),
+    polygon: normalizePolygon(entry.polygon),
+  }
 }
 
 /**
@@ -401,7 +470,7 @@ async function routeImportPins(
  * than when the Map it came from did.
  *
  * `imageUrl` is the one field here that was never storable without an upload.
- * {@link parsePinsFile} has already dropped any that is not on a host this app
+ * {@link readMapValue} has already dropped any that is not on a host this app
  * could have uploaded to; this is where that becomes a stored value, and the
  * check is on the server because the text it vets came from a person.
  */
@@ -454,7 +523,7 @@ async function routeClearDefaultArea(): Promise<ClearDefaultAreaRsp> {
 }
 
 /**
- * Writes this Map's Summary, for whoever `canEditSummary` allows: the Owner on
+ * Writes this Map's Summary, for whoever `canEditMap` allows: the Owner on
  * either kind of Map, and a Moderator on a Collaborative one. An empty string
  * clears it.
  *
@@ -471,23 +540,7 @@ async function routeSetSummary(
   reqMsg: IncomingMessage,
 ): Promise<SetSummaryRsp> {
   const t3 = requirePostId()
-  const meta = await dbGetMapMeta(t3)
-  if (!meta) throw new HttpError(404, 'map not found')
-
-  const access: MapAccess = {
-    userId: context.userId,
-    ownerId: meta.ownerId,
-    collaborative: meta.collaborative,
-    isModerator: false,
-  }
-  if (!canEditSummary(access)) {
-    // The only thing that could still allow it, and only on a Collaborative
-    // Map — moderating grants nothing on a Solo one, so asking there would buy
-    // a round trip that cannot change the answer.
-    if (!meta.collaborative || !(await isModerator())) {
-      throw new HttpError(403, 'not authorized')
-    }
-  }
+  await requireCanEditMap(t3)
 
   const req = await readJson<SetSummaryReq>(reqMsg)
   const summary = normalizeSummary(req.summary)
@@ -497,6 +550,51 @@ async function routeSetSummary(
   }
   await dbSetSummary(t3, summary)
   return {summary}
+}
+
+/**
+ * Traces a Region. A Region is the Map speaking about itself, exactly as a
+ * Summary is, so it answers to the same rule — see {@link requireCanEditMap}.
+ * Authorized before the body is read, for {@link routeSetSummary}'s reason.
+ */
+async function routeAddRegion(reqMsg: IncomingMessage): Promise<AddRegionRsp> {
+  const t3 = requirePostId()
+  await requireCanEditMap(t3)
+
+  const req = await readJson<AddRegionReq>(reqMsg)
+  const region: Region = {
+    id: crypto.randomUUID(),
+    createdAt: Date.now(),
+    name: normalizeRegionName(req.name),
+    polygon: normalizePolygon(req.polygon),
+  }
+  await dbAddRegion(t3, region)
+  return {region}
+}
+
+async function routeUpdateRegion(
+  reqMsg: IncomingMessage,
+): Promise<UpdateRegionRsp> {
+  const t3 = requirePostId()
+  await requireCanEditMap(t3)
+
+  const req = await readJson<UpdateRegionReq>(reqMsg)
+  const patch: Partial<Pick<Region, 'name' | 'polygon'>> = {}
+  if (req.name !== undefined) patch.name = normalizeRegionName(req.name)
+  if (req.polygon !== undefined) patch.polygon = normalizePolygon(req.polygon)
+  const region = await dbUpdateRegion(t3, req.id, patch)
+  return {region}
+}
+
+async function routeDeleteRegion(
+  reqMsg: IncomingMessage,
+): Promise<DeleteRegionRsp> {
+  const t3 = requirePostId()
+  await requireCanEditMap(t3)
+
+  const req = await readJson<DeleteRegionReq>(reqMsg)
+  await dbDeleteRegion(t3, req.id)
+  return {ok: true}
 }
 
 /**
@@ -936,6 +1034,42 @@ function normalizeSummary(summary: string): string {
   return capped(trimmed, MapSummaryMaxLen, 'summary')
 }
 
+/**
+ * A Region's name, refused rather than stored when it is missing or over its
+ * ceiling. Typed as a string and checked as though it were not, for
+ * {@link normalizeTitle}'s reason.
+ */
+function normalizeRegionName(name: string): string {
+  const trimmed = typeof name === 'string' ? name.trim() : ''
+  if (!trimmed) throw new HttpError(400, 'name is required')
+  return capped(trimmed, RegionNameMaxLen, 'name')
+}
+
+/**
+ * A Region's ring, refused rather than stored when it is not one: too few
+ * vertices to enclose anything, more than a Map may spend on one Region, or a
+ * vertex that is not somewhere on Earth. Copied field by field, so nothing a
+ * client tacked onto a vertex is stored.
+ */
+function normalizePolygon(polygon: unknown): LatLng[] {
+  if (
+    !Array.isArray(polygon) ||
+    polygon.length < RegionVertexMinCount ||
+    polygon.length > RegionVertexMaxCount
+  ) {
+    throw new HttpError(
+      400,
+      `a region needs between ${RegionVertexMinCount} and ${RegionVertexMaxCount} points`,
+    )
+  }
+  return polygon.map(vertex => {
+    if (!isLatLng(vertex)) {
+      throw new HttpError(400, 'every point of a region needs a valid location')
+    }
+    return {lat: vertex.lat, lng: vertex.lng}
+  })
+}
+
 function capped(value: string, maxLen: number, field: string): string {
   if (value.length > maxLen)
     throw new HttpError(400, `${field} must be ${maxLen} characters or fewer`)
@@ -1005,6 +1139,36 @@ async function requireAddablePin(t3: T3): Promise<void> {
     isModerator: false,
   }
   if (!canAddPin(access)) throw new HttpError(403, 'not authorized')
+}
+
+/**
+ * The Map, refusing anyone `canEditMap` does not allow: the Owner on either
+ * kind of Map, and a Moderator on a Collaborative one. It serves the Summary
+ * and every Region route, so there is one place this is decided.
+ *
+ * Called before the body is read, so an unauthorized request never pays for
+ * buffering one. `isModerator()` is a Reddit round trip and is reached only
+ * once the Owner check has already failed, which is ADR-0019's cost rule: pay it
+ * on the branch that cannot be answered without it, never on the common one.
+ */
+async function requireCanEditMap(t3: T3): Promise<void> {
+  const meta = await dbGetMapMeta(t3)
+  if (!meta) throw new HttpError(404, 'map not found')
+
+  const access: MapAccess = {
+    userId: context.userId,
+    ownerId: meta.ownerId,
+    collaborative: meta.collaborative,
+    isModerator: false,
+  }
+  if (canEditMap(access)) return
+  // The only thing that could still allow it, and only on a Collaborative Map
+  // — moderating grants nothing on a Solo one, so asking there would buy a
+  // round trip that cannot change the answer. A logged-out reader is refused
+  // outright, for the same reason.
+  if (!context.userId || !meta.collaborative || !(await isModerator())) {
+    throw new HttpError(403, 'not authorized')
+  }
 }
 
 /**

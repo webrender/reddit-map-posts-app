@@ -13,6 +13,8 @@ import type {T2, T3, UiResponse} from '@devvit/web/shared'
 import {
   type AddPinReq,
   type AddPinRsp,
+  type AddRegionReq,
+  type AddRegionRsp,
   type CreateMapPostReq,
   type CreateMapPostRsp,
   type DeleteIndexPostRsp,
@@ -23,8 +25,8 @@ import {
   type ErrorRsp,
   type GetIndexRsp,
   type GetMapRsp,
-  type ImportPinsReq,
-  type ImportPinsRsp,
+  type ImportMapReq,
+  type ImportMapRsp,
   IndexPageSize,
   type IndexPostFormReq,
   MapKind,
@@ -33,13 +35,21 @@ import {
   type NewPostFormReq,
   type Pin,
   PostTitleMaxLen,
+  type Region,
   type SetDefaultAreaReq,
   type SetSummaryReq,
   type SetSummaryRsp,
   type UpdatePinReq,
   type UpdatePinRsp,
+  type UpdateRegionReq,
+  type UpdateRegionRsp,
 } from '../shared/api.ts'
-import {PinImportMaxCount} from '../shared/pins-file.ts'
+import {
+  PinImportMaxCount,
+  RegionMaxCount,
+  RegionNameMaxLen,
+  RegionVertexMaxCount,
+} from '../shared/map-file.ts'
 import type {MapData} from './db.ts'
 import {onReq} from './server.ts'
 
@@ -65,6 +75,7 @@ const redisHGet = redis.hGet.bind(redis)
 const redisHSet = redis.hSet.bind(redis)
 const redisHGetAll = redis.hGetAll.bind(redis)
 const redisHDel = redis.hDel.bind(redis)
+const redisHLen = redis.hLen.bind(redis)
 const redisDel = redis.del.bind(redis)
 const redisZAdd = redis.zAdd.bind(redis)
 const redisZIncrBy = redis.zIncrBy.bind(redis)
@@ -147,6 +158,7 @@ before(async () => {
   }
   redis.hGetAll = async key =>
     Object.fromEntries(redisHashes.get(key) ?? new Map())
+  redis.hLen = async key => redisHashes.get(key)?.size ?? 0
   redis.hDel = async (key, fields) => {
     const hash = redisHashes.get(key)
     if (!hash) return 0
@@ -206,6 +218,10 @@ before(async () => {
       },
       hDel: async (key: string, fields: string[]) => {
         ops.push(() => redis.hDel(key, fields))
+        return tx
+      },
+      del: async (...keys: string[]) => {
+        ops.push(() => redis.del(...keys))
         return tx
       },
       zAdd: async (
@@ -319,6 +335,7 @@ after(async () => {
   redis.hSet = redisHSet
   redis.hGetAll = redisHGetAll
   redis.hDel = redisHDel
+  redis.hLen = redisHLen
   redis.del = redisDel
   redis.zAdd = redisZAdd
   redis.zIncrBy = redisZIncrBy
@@ -662,6 +679,7 @@ test('get map: owner viewing their own map', async () => {
     isOwner: true,
     collaborative: false,
     isModerator: false,
+    regions: [],
   })
 })
 
@@ -995,7 +1013,7 @@ test('import pins: owner adds a whole export at once', async () => {
     pins: [{id: 'p1', location: {lat: 1, lng: 2}, title: 'Cafe'}],
   })
 
-  const req: ImportPinsReq = {
+  const req: ImportMapReq = {
     pins: [
       {title: 'Park', location: {lat: 3, lng: 4}, category: 'Outdoors'},
       {
@@ -1006,9 +1024,9 @@ test('import pins: owner adds a whole export at once', async () => {
       },
     ],
   }
-  const rsp = await postJson(Endpoint.ImportPins, req)
+  const rsp = await postJson(Endpoint.ImportMap, req)
   assert.equal(rsp.status, 200)
-  const body = (await rsp.json()) as ImportPinsRsp
+  const body = (await rsp.json()) as ImportMapRsp
   assert.equal(body.pins.length, 2)
   assert.equal(body.droppedImages, 0)
   assert.deepEqual(
@@ -1032,11 +1050,11 @@ test('import pins: every pin gets a fresh id, whatever the export said', async (
   })
 
   // An id in the text must not be able to overwrite a Pin already on the Map.
-  const rsp = await postJson(Endpoint.ImportPins, {
+  const rsp = await postJson(Endpoint.ImportMap, {
     pins: [{id: 'p1', title: 'Impostor', location: {lat: 3, lng: 4}}],
   })
   assert.equal(rsp.status, 200)
-  const body = (await rsp.json()) as ImportPinsRsp
+  const body = (await rsp.json()) as ImportMapRsp
   assert.notEqual(body.pins[0]?.id, 'p1')
   assert.equal(storedPins().length, 2)
   assert.ok(storedPins().some(pin => pin.title === 'Cafe'))
@@ -1046,21 +1064,21 @@ test('import pins: the cached count rises by exactly what landed', async () => {
   seedMap({ownerId: OWNER, pins: []})
   redisSets.set('index-pins', new Map([[POST, 0]]))
 
-  const req: ImportPinsReq = {
+  const req: ImportMapReq = {
     pins: [
       {title: 'A', location: {lat: 1, lng: 2}},
       {title: 'B', location: {lat: 3, lng: 4}},
       {title: 'C', location: {lat: 5, lng: 6}},
     ],
   }
-  await postJson(Endpoint.ImportPins, req)
+  await postJson(Endpoint.ImportMap, req)
   assert.equal(storedPinCount(), 3)
 })
 
 test('import pins: a Reddit-hosted image survives, another host does not', async () => {
   seedMap({ownerId: OWNER, pins: []})
 
-  const req: ImportPinsReq = {
+  const req: ImportMapReq = {
     pins: [
       {
         title: 'Kept',
@@ -1079,8 +1097,8 @@ test('import pins: a Reddit-hosted image survives, another host does not', async
       },
     ],
   }
-  const rsp = await postJson(Endpoint.ImportPins, req)
-  const body = (await rsp.json()) as ImportPinsRsp
+  const rsp = await postJson(Endpoint.ImportMap, req)
+  const body = (await rsp.json()) as ImportMapRsp
   assert.equal(body.droppedImages, 2)
   assert.equal(body.pins[0]?.imageUrl, 'https://i.redd.it/abc.jpg')
   assert.equal(body.pins[1]?.imageUrl, undefined)
@@ -1099,7 +1117,7 @@ test('import pins: one bad entry writes none of them', async () => {
       {title: 'Also fine', location: {lat: 5, lng: 6}},
     ],
   }
-  const rsp = await postJson(Endpoint.ImportPins, req)
+  const rsp = await postJson(Endpoint.ImportMap, req)
   assert.equal(rsp.status, 400)
   const body = (await rsp.json()) as ErrorRsp
   assert.match(body.error, /Pin 2 \("Broken"\)/)
@@ -1110,7 +1128,7 @@ test('import pins: one bad entry writes none of them', async () => {
 test('import pins: a pin with no title is refused', async () => {
   seedMap({ownerId: OWNER, pins: []})
 
-  const rsp = await postJson(Endpoint.ImportPins, {
+  const rsp = await postJson(Endpoint.ImportMap, {
     pins: [{location: {lat: 1, lng: 2}}],
   })
   assert.equal(rsp.status, 400)
@@ -1120,7 +1138,7 @@ test('import pins: a pin with no title is refused', async () => {
 test('import pins: nothing to add is refused rather than silently doing nothing', async () => {
   seedMap({ownerId: OWNER, pins: []})
 
-  const rsp = await postJson(Endpoint.ImportPins, {pins: []})
+  const rsp = await postJson(Endpoint.ImportMap, {pins: []})
   assert.equal(rsp.status, 400)
 })
 
@@ -1131,7 +1149,7 @@ test('import pins: more than one import may carry is refused', async () => {
     title: `Pin ${i}`,
     location: {lat: 1, lng: 2},
   }))
-  const rsp = await postJson(Endpoint.ImportPins, {pins: many})
+  const rsp = await postJson(Endpoint.ImportMap, {pins: many})
   assert.equal(rsp.status, 400)
   assert.equal(storedPins().length, 0)
 })
@@ -1140,7 +1158,7 @@ test('import pins: a non-owner is forbidden', async () => {
   seedMap({ownerId: OWNER, pins: []})
   requestUserId = 't2_viewer' as T2
 
-  const rsp = await postJson(Endpoint.ImportPins, {
+  const rsp = await postJson(Endpoint.ImportMap, {
     pins: [{title: 'A', location: {lat: 1, lng: 2}}],
   })
   assert.equal(rsp.status, 403)
@@ -1154,7 +1172,7 @@ test('import pins: a moderator who is not the Owner is forbidden, even on a Coll
   requestUserId = MODERATOR
   seedModerator(MODERATOR)
 
-  const rsp = await postJson(Endpoint.ImportPins, {
+  const rsp = await postJson(Endpoint.ImportMap, {
     pins: [{title: 'A', location: {lat: 1, lng: 2}}],
   })
   assert.equal(rsp.status, 403)
@@ -1162,7 +1180,7 @@ test('import pins: a moderator who is not the Owner is forbidden, even on a Coll
 })
 
 test('import pins: 404 when the post has no map', async () => {
-  const rsp = await postJson(Endpoint.ImportPins, {
+  const rsp = await postJson(Endpoint.ImportMap, {
     pins: [{title: 'A', location: {lat: 1, lng: 2}}],
   })
   assert.equal(rsp.status, 404)
@@ -1173,7 +1191,7 @@ test('import pins: a location given as a maps link is refused, not resolved', as
 
   // The format has no field a URL can be a Location in, which is the whole of
   // what keeps ADR-0015 true of a route that takes a list. See ADR-0017.
-  const rsp = await postJson(Endpoint.ImportPins, {
+  const rsp = await postJson(Endpoint.ImportMap, {
     pins: [
       {
         title: 'Somewhere',
@@ -1412,9 +1430,9 @@ test('collaborative update pin: authorId is not patchable', async () => {
 test('collaborative import pins: the Owner adds a whole export, every Pin stamped to themselves', async () => {
   seedCollabMap({ownerId: OWNER, pins: [], ownerName: 'username'})
 
-  const rsp = await postJson(Endpoint.ImportPins, {
+  const rsp = await postJson(Endpoint.ImportMap, {
     pins: [{title: 'A', location: {lat: 1, lng: 2}}],
-  } satisfies ImportPinsReq)
+  } satisfies ImportMapReq)
   assert.equal(rsp.status, 200)
   assert.equal(storedPins()[0]?.authorId, OWNER)
   assert.equal(storedPins()[0]?.author, 'username')
@@ -2785,4 +2803,363 @@ test('delete post: a map Reddit refuses to delete is left whole', async () => {
   assert.equal(redisValues.get(`owner:${POST}`), OWNER)
   assert.equal(redisHashes.get(`pins:${POST}`)?.size, 1)
   assert.equal(redisSets.get('index')?.has(POST), true)
+})
+
+// --- Regions -----------------------------------------------------------------
+
+const TRIANGLE = [
+  {lat: 0, lng: 0},
+  {lat: 0, lng: 1},
+  {lat: 1, lng: 1},
+]
+
+function addRegion(body: AddRegionReq): Promise<Response> {
+  return postJson(Endpoint.AddRegion, body)
+}
+
+async function getMapRsp(): Promise<GetMapRsp> {
+  return (await (
+    await fetch(`${serverURL}/${Endpoint.GetMap}`)
+  ).json()) as GetMapRsp
+}
+
+/** Puts Regions where `dbGetMap` reads them, as the routes would have left them. */
+function seedRegions(...regions: Region[]): void {
+  const hash = new Map<string, string>()
+  for (const region of regions) hash.set(region.id, JSON.stringify(region))
+  redisHashes.set(`regions:${POST}`, hash)
+}
+
+function storedRegion(over: Partial<Region> = {}): Region {
+  return {
+    id: 'r1',
+    createdAt: 1,
+    name: 'North Side',
+    polygon: TRIANGLE,
+    ...over,
+  }
+}
+
+test('region: a map with none says so with an empty list, not an absent field', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+  assert.deepEqual((await getMapRsp()).regions, [])
+})
+
+test('region: the owner adds one, updates it, and deletes it', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+
+  const added = await addRegion({name: '  North Side  ', polygon: TRIANGLE})
+  assert.equal(added.status, 200)
+  const {region} = (await added.json()) as AddRegionRsp
+  // Trimmed on the way in, and stamped by the server rather than the client.
+  assert.equal(region.name, 'North Side')
+  assert.deepEqual(region.polygon, TRIANGLE)
+  assert.ok(region.id)
+  assert.ok(region.createdAt > 0)
+  assert.deepEqual((await getMapRsp()).regions, [region])
+
+  const renamed = await postJson(Endpoint.UpdateRegion, {
+    id: region.id,
+    name: 'East End',
+  } satisfies UpdateRegionReq)
+  assert.equal(renamed.status, 200)
+  const updated = ((await renamed.json()) as UpdateRegionRsp).region
+  assert.equal(updated.name, 'East End')
+  // A patch that names no polygon leaves the polygon, and the age, alone.
+  assert.deepEqual(updated.polygon, TRIANGLE)
+  assert.equal(updated.createdAt, region.createdAt)
+
+  const reshaped = await postJson(Endpoint.UpdateRegion, {
+    id: region.id,
+    polygon: [...TRIANGLE, {lat: 1, lng: 0}],
+  } satisfies UpdateRegionReq)
+  assert.equal(
+    ((await reshaped.json()) as UpdateRegionRsp).region.polygon.length,
+    4,
+  )
+
+  const deleted = await postJson(Endpoint.DeleteRegion, {id: region.id})
+  assert.equal(deleted.status, 200)
+  assert.deepEqual((await getMapRsp()).regions, [])
+})
+
+test('region: nothing a client tacks on is stored', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+  const rsp = await postJson(Endpoint.AddRegion, {
+    name: 'A',
+    polygon: TRIANGLE.map(vertex => ({...vertex, extra: 'x'})),
+    id: 'chosen-by-client',
+    createdAt: 1,
+  })
+  const {region} = (await rsp.json()) as AddRegionRsp
+  assert.notEqual(region.id, 'chosen-by-client')
+  assert.ok(region.createdAt > 1)
+  assert.deepEqual(region.polygon, TRIANGLE)
+})
+
+test('region: a viewer, a contributor and a logged-out reader are each forbidden', async () => {
+  seedCollabMap({ownerId: OWNER, pins: []})
+  seedRegions(storedRegion())
+
+  for (const userId of ['t2_viewer' as T2, CONTRIBUTOR, undefined]) {
+    requestUserId = userId
+    const label = `user=${userId}`
+    assert.equal(
+      (await addRegion({name: 'X', polygon: TRIANGLE})).status,
+      403,
+      `add ${label}`,
+    )
+    assert.equal(
+      (await postJson(Endpoint.UpdateRegion, {id: 'r1', name: 'X'})).status,
+      403,
+      `update ${label}`,
+    )
+    assert.equal(
+      (await postJson(Endpoint.DeleteRegion, {id: 'r1'})).status,
+      403,
+      `delete ${label}`,
+    )
+  }
+  requestUserId = OWNER
+  assert.equal((await getMapRsp()).regions.length, 1)
+})
+
+test('region: a moderator who is not the Owner is forbidden on a Solo Map', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+  requestUserId = MODERATOR
+  seedModerator(MODERATOR)
+
+  assert.equal((await addRegion({name: 'X', polygon: TRIANGLE})).status, 403)
+  // Moderating grants nothing here, and the route never asked Reddit.
+  assert.equal(moderatorReadCount, 0)
+})
+
+test('region: a moderator may draw one on a Collaborative Map', async () => {
+  seedCollabMap({ownerId: OWNER, pins: []})
+  requestUserId = MODERATOR
+  seedModerator(MODERATOR)
+
+  assert.equal((await addRegion({name: 'X', polygon: TRIANGLE})).status, 200)
+})
+
+test('region: the owner of a Collaborative Map pays no moderator round trip', async () => {
+  seedCollabMap({ownerId: OWNER, pins: []})
+
+  assert.equal((await addRegion({name: 'X', polygon: TRIANGLE})).status, 200)
+  assert.equal(moderatorReadCount, 0)
+})
+
+test('region: 404 when the post has no map yet', async () => {
+  assert.equal((await addRegion({name: 'X', polygon: TRIANGLE})).status, 404)
+})
+
+test('region: updating or deleting one that is not there is a loud 404 or a quiet no-op as appropriate', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+  assert.equal(
+    (await postJson(Endpoint.UpdateRegion, {id: 'nope', name: 'X'})).status,
+    404,
+  )
+  assert.equal(
+    (await postJson(Endpoint.DeleteRegion, {id: 'nope'})).status,
+    200,
+  )
+})
+
+test('region: refuses a missing or over-long name', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+  assert.equal((await addRegion({name: '   ', polygon: TRIANGLE})).status, 400)
+  const rsp = await addRegion({
+    name: 'x'.repeat(RegionNameMaxLen + 1),
+    polygon: TRIANGLE,
+  })
+  assert.equal(rsp.status, 400)
+  assert.equal(
+    ((await rsp.json()) as ErrorRsp).error,
+    `name must be ${RegionNameMaxLen} characters or fewer`,
+  )
+})
+
+test('region: refuses too few vertices, too many, and a malformed one', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+  assert.equal(
+    (await addRegion({name: 'X', polygon: TRIANGLE.slice(0, 2)})).status,
+    400,
+  )
+  assert.equal(
+    (
+      await addRegion({
+        name: 'X',
+        polygon: Array.from({length: RegionVertexMaxCount + 1}, () => ({
+          lat: 0,
+          lng: 0,
+        })),
+      })
+    ).status,
+    400,
+  )
+  for (const bad of [{lat: 91, lng: 0}, {lat: 0}, 'nope', null]) {
+    const rsp = await postJson(Endpoint.AddRegion, {
+      name: 'X',
+      polygon: [...TRIANGLE.slice(0, 2), bad],
+    })
+    assert.equal(rsp.status, 400, JSON.stringify(bad))
+  }
+  assert.equal(
+    (await postJson(Endpoint.AddRegion, {name: 'X', polygon: 'triangle'}))
+      .status,
+    400,
+  )
+  // Refused outright, so nothing was stored.
+  assert.deepEqual((await getMapRsp()).regions, [])
+})
+
+test('region: refuses a reshape to something that is not a polygon', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+  seedRegions(storedRegion())
+  const rsp = await postJson(Endpoint.UpdateRegion, {
+    id: 'r1',
+    polygon: TRIANGLE.slice(0, 2),
+  })
+  assert.equal(rsp.status, 400)
+  assert.deepEqual((await getMapRsp()).regions[0]?.polygon, TRIANGLE)
+})
+
+test('region: a map holds no more than its ceiling', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+  seedRegions(
+    ...Array.from({length: RegionMaxCount}, (_, i) =>
+      storedRegion({id: `r${i}`, name: `R${i}`}),
+    ),
+  )
+  const rsp = await addRegion({name: 'One too many', polygon: TRIANGLE})
+  assert.equal(rsp.status, 400)
+  assert.equal((await getMapRsp()).regions.length, RegionMaxCount)
+})
+
+test('delete map: its regions go with it', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+  seedRedditPost(POST)
+  await addRegion({name: 'X', polygon: TRIANGLE})
+  assert.equal(redisHashes.has(`regions:${POST}`), true)
+
+  const rsp = await postJson(Endpoint.DeletePost, {})
+  assert.equal(rsp.status, 200)
+  // An orphaned key here would be invisible and permanent.
+  assert.equal(redisHashes.has(`regions:${POST}`), false)
+})
+
+// --- Import carries the whole Map --------------------------------------------
+
+const somePin = {title: 'Cafe', location: {lat: 1, lng: 2}}
+
+test('import map: a file with Regions and a Summary replaces both while adding Pins', async () => {
+  seedMap({
+    ownerId: OWNER,
+    pins: [{id: 'old', location: {lat: 5, lng: 5}, title: 'Already here'}],
+  })
+  seedRegions(storedRegion({id: 'a'}), storedRegion({id: 'b', name: 'Other'}))
+  await setSummary('The old summary.')
+
+  const rsp = await postJson(Endpoint.ImportMap, {
+    pins: [somePin],
+    regions: [{name: 'Harbour', polygon: TRIANGLE}],
+    summary: 'The new summary.',
+  } satisfies ImportMapReq)
+  assert.equal(rsp.status, 200)
+  const body = (await rsp.json()) as ImportMapRsp
+  assert.deepEqual(body.replaced, {summary: true, regions: 2})
+  assert.equal(body.summary, 'The new summary.')
+  assert.deepEqual(
+    body.regions.map(r => r.name),
+    ['Harbour'],
+  )
+
+  const map = await getMapRsp()
+  // Pins add; they never replace.
+  assert.equal(map.pins.length, 2)
+  assert.equal(map.summary, 'The new summary.')
+  assert.deepEqual(
+    map.regions.map(r => r.name),
+    ['Harbour'],
+  )
+  // Stamped where it landed, not carried from the file.
+  assert.notEqual(map.regions[0]?.id, 'a')
+  assert.ok((map.regions[0]?.createdAt ?? 0) > 1)
+})
+
+test('import map: a v1 file leaves the Map’s Summary and Regions untouched', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+  seedRegions(storedRegion())
+  await setSummary('Keep me.')
+
+  const rsp = await postJson(Endpoint.ImportMap, {pins: [somePin]})
+  assert.equal(rsp.status, 200)
+  const body = (await rsp.json()) as ImportMapRsp
+  assert.deepEqual(body.replaced, {summary: false, regions: 0})
+  assert.equal(body.summary, 'Keep me.')
+  assert.equal(body.regions.length, 1)
+
+  const map = await getMapRsp()
+  assert.equal(map.summary, 'Keep me.')
+  assert.deepEqual(
+    map.regions.map(r => r.id),
+    ['r1'],
+  )
+  assert.equal(map.pins.length, 1)
+})
+
+test('import map: an empty regions list clears them, and an empty summary clears the Summary', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+  seedRegions(storedRegion())
+  await setSummary('Going.')
+
+  const rsp = await postJson(Endpoint.ImportMap, {
+    pins: [somePin],
+    regions: [],
+    summary: '',
+  })
+  assert.equal(rsp.status, 200)
+  const body = (await rsp.json()) as ImportMapRsp
+  assert.deepEqual(body.replaced, {summary: true, regions: 1})
+  assert.equal('summary' in body, false)
+
+  const map = await getMapRsp()
+  assert.deepEqual(map.regions, [])
+  assert.equal(map.summary, undefined)
+})
+
+test('import map: a bad Region refuses the whole Import, changing nothing', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+  seedRegions(storedRegion())
+  await setSummary('Untouched.')
+
+  const rsp = await postJson(Endpoint.ImportMap, {
+    pins: [somePin],
+    regions: [{name: 'Line', polygon: TRIANGLE.slice(0, 2)}],
+    summary: 'Never lands.',
+  })
+  assert.equal(rsp.status, 400)
+
+  const map = await getMapRsp()
+  assert.equal(map.pins.length, 0)
+  assert.equal(map.summary, 'Untouched.')
+  assert.deepEqual(
+    map.regions.map(r => r.id),
+    ['r1'],
+  )
+})
+
+test('import map: a moderator may not replace a Collaborative Map’s Regions from a paste', async () => {
+  seedCollabMap({ownerId: OWNER, pins: []})
+  seedRegions(storedRegion())
+  requestUserId = MODERATOR
+  seedModerator(MODERATOR)
+
+  const rsp = await postJson(Endpoint.ImportMap, {
+    pins: [somePin],
+    regions: [],
+  })
+  assert.equal(rsp.status, 403)
+  requestUserId = OWNER
+  assert.equal((await getMapRsp()).regions.length, 1)
 })

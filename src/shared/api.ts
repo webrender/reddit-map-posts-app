@@ -1,5 +1,5 @@
 import type {Form, T2, T3} from '@devvit/web/shared'
-import type {PinExport} from './pins-file.ts'
+import type {PinExport, RegionExport} from './map-file.ts'
 
 /** Generic error detail for all responses. */
 export type ErrorRsp = {error: string; status: number}
@@ -120,6 +120,30 @@ export type Pin = {
   author?: string
 }
 
+/**
+ * A named polygon over part of a Map. Which Pins are in it is never stored: a
+ * Pin is in a Region if its Location falls inside `polygon`, worked out by the
+ * client at render time. See ADR-0021.
+ */
+export type Region = {
+  id: string
+  /**
+   * When the server first stored this Region, in epoch ms. Never read from a
+   * client and never written by an Export, for the reason {@link Pin.createdAt}
+   * is not: it exists so a Region's colour can be broken by age, and an
+   * imported Region is stamped where it lands. See ADR-0018.
+   */
+  createdAt: number
+  name: string
+  /**
+   * The ring's vertices in order, not repeated at the end. Between
+   * `RegionVertexMinCount` and `RegionVertexMaxCount` of them, each a valid
+   * {@link LatLng}. A ring that crosses the antimeridian simply has vertices on
+   * both sides of it: see `regionBounds` and `containsLocation`.
+   */
+  polygon: LatLng[]
+}
+
 /** The fields an Owner supplies when adding a Pin. */
 export type PinInput = {
   location: LatLng
@@ -170,6 +194,13 @@ export type GetMapRsp = {
    * only the full screen one has a Sidebar to put it in. See ADR-0020.
    */
   summary?: string
+  /**
+   * The Map's Regions — always present, `[]` where there are none. Unlike
+   * {@link summary} a list has an honest empty value, so the argument for
+   * absent-is-a-fact does not apply. They ride along with every reading,
+   * Preview included, since a Preview draws them. See ADR-0021.
+   */
+  regions: Region[]
 }
 
 /**
@@ -193,24 +224,59 @@ export type DeletePinReq = {id: string}
 export type DeletePinRsp = {ok: true}
 
 /**
- * Adds a set of Pins to this Map at once, read from an Export the Owner pasted
- * in. It names no Map: the one it adds to is the Post the request came from,
- * and only its Owner may ask.
+ * Applies an Export to this Map: its Pins are added, and its Summary and
+ * Regions — where the file carries them — replace what the Map has. It names no
+ * Map: the one it applies to is the Post the request came from, and only its
+ * Owner may ask.
  *
- * Every Pin is checked before any is written, so an Export with one bad entry
- * adds nothing rather than most of itself — a half-applied Import has no clean
- * retry, since Import only ever adds and re-running it would duplicate
- * whatever landed. See ADR-0017.
+ * `regions` and `summary` are absent where the file did not mention them, and
+ * that is the whole of what leaves them alone: `regions: []` clears a Map's
+ * Regions and an absent `regions` does not, exactly as `summary: ''` clears a
+ * Summary and an absent one does not. See ADR-0022.
+ *
+ * Everything is checked before anything is written, so an Export with one bad
+ * entry changes nothing rather than most of itself — a half-applied Import has
+ * no clean retry, since its Pins add and re-running it would duplicate whatever
+ * landed. See ADR-0017.
  */
-export type ImportPinsReq = {pins: PinExport[]}
+export type ImportMapReq = {
+  pins: PinExport[]
+  regions?: RegionExport[]
+  summary?: string
+}
 
 /**
- * What landed. The Pins come back whole, with the ids the server minted, so the
- * Map draws exactly what it now holds rather than guessing. `droppedImages`
- * counts the Pins whose picture was on a host this app could not have uploaded
- * to: the Pin is kept and the picture is not.
+ * What landed, whole, so the Map draws what it now holds rather than guessing:
+ * the Pins with the ids the server minted, and the Regions and Summary as they
+ * now stand. `droppedImages` counts the Pins whose picture was on a host this
+ * app could not have uploaded to: the Pin is kept and the picture is not.
+ * `replaced` says what the Import actually overwrote — a Summary the Map had, a
+ * count of Regions it had.
  */
-export type ImportPinsRsp = {pins: Pin[]; droppedImages: number}
+export type ImportMapRsp = {
+  pins: Pin[]
+  droppedImages: number
+  regions: Region[]
+  summary?: string
+  replaced: {summary: boolean; regions: number}
+}
+
+/**
+ * Adds a Region. It names no Map, for the reason every Pin route does not.
+ * Owner, or a Moderator on a Collaborative Map: see `canEditMap`.
+ */
+export type AddRegionReq = {name: string; polygon: LatLng[]}
+export type AddRegionRsp = {region: Region}
+
+export type UpdateRegionReq = {
+  id: string
+  name?: string
+  polygon?: LatLng[]
+}
+export type UpdateRegionRsp = {region: Region}
+
+export type DeleteRegionReq = {id: string}
+export type DeleteRegionRsp = {ok: true}
 
 /**
  * Makes the rectangle a moderator framed the subreddit's Default Area. It
@@ -362,6 +428,37 @@ export function deletePostForm(collaborative: boolean): Form {
 }
 
 /**
+ * The confirmation an Owner passes through before an Import replaces something.
+ * Reddit's own modal, whose accept button is the whole of the confirmation —
+ * the same shape {@link deletePostForm} has, for the same reason. It is shown
+ * only when something would actually be replaced, so it names exactly that.
+ *
+ * It cannot name the Post, as {@link deletePostForm} cannot: a web view is not
+ * told the title of the post it is running inside. See ADR-0022.
+ */
+export function importOverwriteForm(replaced: {
+  summary: boolean
+  regions: number
+}): Form {
+  const parts: string[] = []
+  if (replaced.summary) parts.push('its summary')
+  if (replaced.regions) {
+    parts.push(
+      replaced.regions === 1
+        ? 'its region'
+        : `all ${replaced.regions} of its regions`,
+    )
+  }
+  return {
+    title: 'Replace what this map says about itself?',
+    description: `This import will replace ${parts.join(' and ')}. The pins in it are added to the ones already on the map. This cannot be undone.`,
+    acceptLabel: 'Replace',
+    cancelLabel: 'Cancel',
+    fields: [],
+  }
+}
+
+/**
  * The same confirmation for the other post type, in the same shape and with
  * the same empty field list. What it says is different because what is lost is
  * different: an Index Post owns no Map, so deleting one takes a list and
@@ -490,7 +587,7 @@ export const PostTitleMaxLen = 300
  * (`PinDescriptionMaxLen`, 2000) because one Summary speaks for a whole Map
  * where a description speaks for one Pin, and because Markdown spends
  * characters on markup that a reader never sees. It lives here rather than in
- * `pins-file.ts` — a Summary is not a Pin and never appears in an Export — and
+ * `map-file.ts` — a Summary is not a Pin, and `map-file.ts` imports it — and
  * both ends need the number.
  */
 export const MapSummaryMaxLen = 4000
@@ -502,14 +599,18 @@ export const Endpoint = {
   AddPin: 'api/pin/add',
   UpdatePin: 'api/pin/update',
   DeletePin: 'api/pin/delete',
-  /** Add a whole Export's worth of Pins at once. Owner only. */
-  ImportPins: 'api/pin/import',
+  /** Apply a whole Export: add its Pins, replace its Summary and Regions. Owner only. */
+  ImportMap: 'api/map/import',
   /** Store the framed rectangle as the subreddit's Default Area. Mods only. */
   SetDefaultArea: 'api/area/set',
   /** Forget it, so empty Maps open on the whole world again. Mods only. */
   ClearDefaultArea: 'api/area/clear',
   /** Write this Map's Summary. Owner, or a Moderator on a Collaborative Map. */
   SetSummary: 'api/summary/set',
+  /** Trace a Region. Owner, or a Moderator on a Collaborative Map. */
+  AddRegion: 'api/region/add',
+  UpdateRegion: 'api/region/update',
+  DeleteRegion: 'api/region/delete',
   /** `?url=` an allowlisted external URL; the server fetches and forwards it. */
   Proxy: 'api/proxy',
   /** `?q=&sort=&page=` one page of an Index Post's Listing. */
@@ -532,10 +633,13 @@ export const EndpointMethod = {
   [Endpoint.AddPin]: 'POST',
   [Endpoint.UpdatePin]: 'POST',
   [Endpoint.DeletePin]: 'POST',
-  [Endpoint.ImportPins]: 'POST',
+  [Endpoint.ImportMap]: 'POST',
   [Endpoint.SetDefaultArea]: 'POST',
   [Endpoint.ClearDefaultArea]: 'POST',
   [Endpoint.SetSummary]: 'POST',
+  [Endpoint.AddRegion]: 'POST',
+  [Endpoint.UpdateRegion]: 'POST',
+  [Endpoint.DeleteRegion]: 'POST',
   [Endpoint.Proxy]: 'GET',
   [Endpoint.GetIndex]: 'GET',
   [Endpoint.CreateMapPost]: 'POST',

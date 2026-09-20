@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
 import {test} from 'node:test'
-import type {LatLng, Pin} from '../shared/api.ts'
+import type {LatLng, Pin, Region} from '../shared/api.ts'
 import {
   categoryColors,
   categoryPalette,
   pinColor,
+  regionColors,
   uncategorizedColor,
 } from './category-color.ts'
 
@@ -160,6 +161,77 @@ test('no addition to any Map ever repaints what was already on it', () => {
         color,
         `trial ${trial}: ${category} was repainted by ${added
           .map(p => p.category)
+          .join(', ')}`,
+      )
+    }
+  }
+})
+
+function region(id: string, name: string, createdAt: number): Region {
+  return {id, name, createdAt, polygon: []}
+}
+
+test('gives every Region on a Map a colour of its own, from the Category palette', () => {
+  const colors = regionColors([
+    region('1', 'North Side', 1),
+    region('2', 'East End', 2),
+    region('3', 'Harbour', 3),
+  ])
+  assert.equal(new Set(colors.values()).size, 3)
+  for (const color of colors.values())
+    assert.ok(categoryPalette.includes(color))
+})
+
+test('a Region and a Category of one name wear one colour: it identifies within an axis, not across', () => {
+  const colors = regionColors([region('1', 'Cafes', 1)])
+  assert.equal(colors.get('Cafes'), colorOf([pin('a', 'Cafes', 1)], 'Cafes'))
+})
+
+test('a Region older than its rival keeps the colour they both want', () => {
+  // Find two names that prefer the same slot, so the age tie-break is exercised.
+  const names: string[] = []
+  const probe = (name: string): string | undefined =>
+    regionColors([region('x', name, 0)]).get(name)
+  const first = 'aaa'
+  names.push(first)
+  for (let i = 0; names.length < 2; i++) {
+    const candidate = `n${i}`
+    if (probe(candidate) === probe(first)) names.push(candidate)
+  }
+  const [older, younger] = names as [string, string]
+  const colors = regionColors([region('1', older, 1), region('2', younger, 2)])
+  assert.equal(colors.get(older), probe(older))
+  assert.notEqual(colors.get(younger), colors.get(older))
+})
+
+test('adding a Region never repaints the Regions already on the Map', () => {
+  let seed = 0x1d2c_3b4a
+  const rand = (n: number): number => {
+    seed = (Math.imul(seed, 1103515245) + 12345) >>> 0
+    return seed % n
+  }
+  const name = (): string =>
+    String.fromCharCode(97 + rand(26), 97 + rand(26), 97 + rand(26))
+
+  for (let trial = 0; trial < 300; trial++) {
+    const existing: Region[] = []
+    for (let i = 0, count = 1 + rand(7); i < count; i++) {
+      existing.push(region(`r${i}`, name(), rand(1000)))
+    }
+    const before = regionColors(existing)
+
+    const added: Region[] = []
+    for (let i = 0, count = 1 + rand(3); i < count; i++) {
+      added.push(region(`new${i}`, name(), 1000 + rand(1000)))
+    }
+    const after = regionColors([...existing, ...added])
+
+    for (const [regionName, color] of before) {
+      assert.equal(
+        after.get(regionName),
+        color,
+        `trial ${trial}: ${regionName} was repainted by ${added
+          .map(r => r.name)
           .join(', ')}`,
       )
     }
