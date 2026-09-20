@@ -497,7 +497,7 @@ async function init(): Promise<void> {
   // first `addSource` would throw — and `init` awaits `fetchGetMap` straight
   // away, so in practice the data arrives first and the temptation is to draw at
   // once. `regionsReady` is what every later `renderRegions()` waits behind.
-  map.once('load', () => {
+  void map.once('load', () => {
     regionsReady = true
     renderRegions()
   })
