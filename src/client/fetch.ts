@@ -13,6 +13,8 @@ import {
   type ImportPinsRsp,
   type SetDefaultAreaReq,
   type SetDefaultAreaRsp,
+  type SetSummaryReq,
+  type SetSummaryRsp,
   type UpdatePinReq,
   type UpdatePinRsp,
 } from '../shared/api.ts'
@@ -147,4 +149,14 @@ export async function fetchClearDefaultArea(): Promise<
   ClearDefaultAreaRsp | undefined
 > {
   return fetchJson(Endpoint.ClearDefaultArea, {})
+}
+
+/**
+ * Writes this Map's Summary. Names no Map for the reason the Pin routes do not:
+ * it is the Post this page is running in. An empty string clears it.
+ */
+export async function fetchSetSummary(
+  req: SetSummaryReq,
+): Promise<SetSummaryRsp | undefined> {
+  return fetchJson(Endpoint.SetSummary, req)
 }

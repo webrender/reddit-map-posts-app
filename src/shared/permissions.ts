@@ -53,3 +53,28 @@ export function canEditPin(access: MapAccess, pin: Pin): boolean {
   if (access.isModerator) return true
   return pinAuthorId(pin, access.ownerId) === access.userId
 }
+
+/**
+ * Whether `access.userId` may write this Map's Summary. Solo: only the Owner,
+ * exactly as {@link canEditPin} — moderating grants nothing on a Solo Map.
+ * Collaborative: the Owner, or a Moderator.
+ *
+ * It gives the Owner what `canEditPin` deliberately withholds, and the two
+ * sitting side by side will read as an inconsistency to fix. They are not.
+ * ADR-0019 drew the line this falls on: "ownership here is of the Post, not of
+ * what other people put on it." A Pin is what someone else put on the Map, so
+ * the Owner gets no say over it. A Summary is the Map's own account of itself —
+ * it is the Post, the way the title and the byline are — so rewriting it takes
+ * nothing from anybody. A Moderator may too, for the reason they may take down
+ * a Pin: a subreddit needs someone able to remove abusive text without deleting
+ * the Map under it, and a Summary is the most visible text on one. See ADR-0020.
+ *
+ * A logged-out reader is refused first, matching `canEditPin`'s shape. There is
+ * no `authorId` here for `undefined === undefined` to go wrong on, so it is not
+ * literally that bug — the ordering is kept so all three predicates read alike.
+ */
+export function canEditSummary(access: MapAccess): boolean {
+  if (!access.userId) return false
+  if (!access.collaborative) return access.userId === access.ownerId
+  return access.userId === access.ownerId || access.isModerator
+}

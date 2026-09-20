@@ -5,6 +5,7 @@ import type {Pin} from './api.ts'
 import {
   canAddPin,
   canEditPin,
+  canEditSummary,
   type MapAccess,
   pinAuthorId,
 } from './permissions.ts'
@@ -132,6 +133,49 @@ test('canEditPin: exhaustive over collaborative × moderator × who is asking ×
       result,
       expected,
       `collaborative=${collaborative} isModerator=${isModerator} userId=${userId} authorId=${authorId}`,
+    )
+  }
+})
+
+/**
+ * Exhaustive over what `canEditSummary` promises, and deliberately asserting
+ * the two rows where it parts company with `canEditPin`: a Moderator gets
+ * nothing on a Solo Map, and the Owner keeps the Summary on a Collaborative one
+ * even though they have no power over its Pins. See ADR-0020.
+ */
+test('canEditSummary: exhaustive over collaborative × moderator × who is asking', () => {
+  const cases: [
+    collaborative: boolean,
+    isModerator: boolean,
+    userId: T2 | undefined,
+    expected: boolean,
+  ][] = [
+    // --- Solo Map: only the Owner, ever. Moderating grants nothing here. ---
+    [false, false, undefined, false],
+    [false, false, OWNER, true],
+    [false, false, OTHER, false],
+    [false, true, undefined, false],
+    [false, true, OWNER, true],
+    // The row that keeps the Solo rule honest: a Moderator is still refused.
+    [false, true, OTHER, false],
+
+    // --- Collaborative Map: the Owner, or a Moderator. ---
+    [true, false, undefined, false],
+    // The Owner keeps the Summary, unlike a Contributor's Pin.
+    [true, false, OWNER, true],
+    // A Contributor may write their own Pins and not the Map's Summary.
+    [true, false, AUTHOR, false],
+    [true, false, OTHER, false],
+    [true, true, undefined, false],
+    [true, true, OWNER, true],
+    [true, true, OTHER, true],
+  ]
+
+  for (const [collaborative, isModerator, userId, expected] of cases) {
+    assert.equal(
+      canEditSummary(access({collaborative, isModerator, userId})),
+      expected,
+      `collaborative=${collaborative} isModerator=${isModerator} userId=${userId}`,
     )
   }
 })

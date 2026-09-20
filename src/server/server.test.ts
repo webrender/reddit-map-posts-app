@@ -28,11 +28,14 @@ import {
   IndexPageSize,
   type IndexPostFormReq,
   MapKind,
+  MapSummaryMaxLen,
   NewPostFormName,
   type NewPostFormReq,
   type Pin,
   PostTitleMaxLen,
   type SetDefaultAreaReq,
+  type SetSummaryReq,
+  type SetSummaryRsp,
   type UpdatePinReq,
   type UpdatePinRsp,
 } from '../shared/api.ts'
@@ -511,6 +514,137 @@ test('get map: 404 when the post has no map yet', async () => {
     error: 'map not found',
     status: 404,
   })
+})
+
+/** Writes a Summary as whoever the request is currently from. */
+function setSummary(summary: string): Promise<Response> {
+  return postJson(Endpoint.SetSummary, {summary} satisfies SetSummaryReq)
+}
+
+test('set summary: the owner writes one, and the map hands it back', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+
+  const rsp = await setSummary('  Cafes worth the walk.  ')
+  assert.equal(rsp.status, 200)
+  // Trimmed on the way in, and answered with what was actually stored.
+  assert.deepEqual<SetSummaryRsp>(await rsp.json(), {
+    summary: 'Cafes worth the walk.',
+  })
+
+  const map = (await (
+    await fetch(`${serverURL}/${Endpoint.GetMap}`)
+  ).json()) as GetMapRsp
+  assert.equal(map.summary, 'Cafes worth the walk.')
+})
+
+test('set summary: a map with none has no summary field at all', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+
+  const map = (await (
+    await fetch(`${serverURL}/${Endpoint.GetMap}`)
+  ).json()) as GetMapRsp
+  // Absent, not empty — the shape `defaultArea` already uses.
+  assert.equal('summary' in map, false)
+})
+
+test('set summary: an empty string clears it', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+  await setSummary('Something')
+
+  const rsp = await setSummary('   ')
+  assert.equal(rsp.status, 200)
+  assert.deepEqual<SetSummaryRsp>(await rsp.json(), {})
+
+  const map = (await (
+    await fetch(`${serverURL}/${Endpoint.GetMap}`)
+  ).json()) as GetMapRsp
+  assert.equal(map.summary, undefined)
+})
+
+test('set summary: one longer than the ceiling is refused', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+
+  const rsp = await setSummary('x'.repeat(MapSummaryMaxLen + 1))
+  assert.equal(rsp.status, 400)
+  const body = (await rsp.json()) as ErrorRsp
+  assert.equal(
+    body.error,
+    `summary must be ${MapSummaryMaxLen} characters or fewer`,
+  )
+})
+
+test('set summary: a viewer is forbidden', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+  requestUserId = 't2_viewer' as T2
+
+  const rsp = await setSummary('Mine now')
+  assert.equal(rsp.status, 403)
+})
+
+test('set summary: logged out is forbidden', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+  requestUserId = undefined
+
+  const rsp = await setSummary('Mine now')
+  assert.equal(rsp.status, 403)
+})
+
+test('set summary: a moderator who is not the Owner is forbidden on a Solo Map', async () => {
+  // Moderating grants nothing on a Solo Map — the same rule the Pin routes
+  // hold to. See ADR-0019.
+  seedMap({ownerId: OWNER, pins: []})
+  requestUserId = MODERATOR
+  seedModerator(MODERATOR)
+
+  const rsp = await setSummary('Taken down')
+  assert.equal(rsp.status, 403)
+  // And it never asked Reddit: the Solo branch cannot be changed by the answer.
+  assert.equal(moderatorReadCount, 0)
+})
+
+test('set summary: a moderator may write one on a Collaborative Map', async () => {
+  seedCollabMap({ownerId: OWNER, pins: []})
+  requestUserId = MODERATOR
+  seedModerator(MODERATOR)
+
+  const rsp = await setSummary('Please keep pins inside the city.')
+  assert.equal(rsp.status, 200)
+})
+
+test('set summary: a contributor is forbidden on a Collaborative Map', async () => {
+  // A Contributor's rights are exactly their own Pins; the Summary is the
+  // Post's, and the Post is the Owner's. See ADR-0020.
+  seedCollabMap({ownerId: OWNER, pins: []})
+  requestUserId = CONTRIBUTOR
+
+  const rsp = await setSummary('Mine now')
+  assert.equal(rsp.status, 403)
+})
+
+test('set summary: the owner of a Collaborative Map pays no moderator round trip', async () => {
+  // ADR-0019's cost rule: `isModerator()` is only reached once the Owner check
+  // has already failed.
+  seedCollabMap({ownerId: OWNER, pins: []})
+
+  const rsp = await setSummary('Ours.')
+  assert.equal(rsp.status, 200)
+  assert.equal(moderatorReadCount, 0)
+})
+
+test('set summary: 404 when the post has no map yet', async () => {
+  const rsp = await setSummary('Nothing to describe')
+  assert.equal(rsp.status, 404)
+})
+
+test('delete map: the summary goes with it', async () => {
+  seedMap({ownerId: OWNER, pins: []})
+  seedRedditPost(POST)
+  await setSummary('Cafes worth the walk.')
+
+  const rsp = await postJson(Endpoint.DeletePost, {})
+  assert.equal(rsp.status, 200)
+  // An orphaned key here would be invisible and permanent.
+  assert.equal(redisValues.has(`summary:${POST}`), false)
 })
 
 test('get map: owner viewing their own map', async () => {

@@ -41,6 +41,7 @@ import {
   type LatLng,
   type MapBounds,
   MapKind,
+  MapSummaryMaxLen,
   NewPostFormName,
   type NewPostFormReq,
   newPostForm,
@@ -48,10 +49,17 @@ import {
   PostTitleMaxLen,
   type SetDefaultAreaReq,
   type SetDefaultAreaRsp,
+  type SetSummaryReq,
+  type SetSummaryRsp,
   type UpdatePinReq,
   type UpdatePinRsp,
 } from '../shared/api.ts'
-import {canAddPin, canEditPin, type MapAccess} from '../shared/permissions.ts'
+import {
+  canAddPin,
+  canEditPin,
+  canEditSummary,
+  type MapAccess,
+} from '../shared/permissions.ts'
 import {
   isRedditMediaUrl,
   PinCategoryMaxLen,
@@ -65,6 +73,7 @@ import {
   dbAddPin,
   dbAddPins,
   dbClearIndexMiss,
+  dbClearSummary,
   dbCreateMap,
   dbDeleteDefaultArea,
   dbDeleteMap,
@@ -81,6 +90,7 @@ import {
   dbSetCachedScores,
   dbSetDefaultArea,
   dbSetScoreCursor,
+  dbSetSummary,
   dbUnlistMap,
   dbUpdatePin,
   type IndexRow,
@@ -129,6 +139,7 @@ type AnyRsp =
   | DeleteIndexPostRsp
   | SetDefaultAreaRsp
   | ClearDefaultAreaRsp
+  | SetSummaryRsp
   | UiResponse
   | TriggerResponse
   | ErrorRsp
@@ -198,6 +209,9 @@ async function route(
       case Endpoint.ClearDefaultArea:
         rsp = await routeClearDefaultArea()
         break
+      case Endpoint.SetSummary:
+        rsp = await routeSetSummary(reqMsg)
+        break
       case Endpoint.GetIndex:
         rsp = await routeGetIndex(url.searchParams)
         break
@@ -260,6 +274,7 @@ async function routeGetMap(searchParams: URLSearchParams): Promise<GetMapRsp> {
     isModerator: moderator,
   }
   if (defaultArea) rsp.defaultArea = defaultArea
+  if (map.summary) rsp.summary = map.summary
   return rsp
 }
 
@@ -436,6 +451,52 @@ async function routeClearDefaultArea(): Promise<ClearDefaultAreaRsp> {
   if (!(await isModerator())) throw new HttpError(403, 'not authorized')
   await dbDeleteDefaultArea()
   return {ok: true}
+}
+
+/**
+ * Writes this Map's Summary, for whoever `canEditSummary` allows: the Owner on
+ * either kind of Map, and a Moderator on a Collaborative one. An empty string
+ * clears it.
+ *
+ * Authorized before the body is read, which every Pin route would do too if it
+ * could — `routeUpdatePin` reads first only because it needs `req.id` to find
+ * the Pin it is about to authorize against. This route is about the Map, so it
+ * can refuse without ever buffering a body. See {@link requireSoloOwner}.
+ *
+ * `isModerator()` is a Reddit round trip and is reached only once the Owner
+ * check has already failed, which is ADR-0019's cost rule: pay it on the branch
+ * that cannot be answered without it, never on the common one.
+ */
+async function routeSetSummary(
+  reqMsg: IncomingMessage,
+): Promise<SetSummaryRsp> {
+  const t3 = requirePostId()
+  const meta = await dbGetMapMeta(t3)
+  if (!meta) throw new HttpError(404, 'map not found')
+
+  const access: MapAccess = {
+    userId: context.userId,
+    ownerId: meta.ownerId,
+    collaborative: meta.collaborative,
+    isModerator: false,
+  }
+  if (!canEditSummary(access)) {
+    // The only thing that could still allow it, and only on a Collaborative
+    // Map — moderating grants nothing on a Solo one, so asking there would buy
+    // a round trip that cannot change the answer.
+    if (!meta.collaborative || !(await isModerator())) {
+      throw new HttpError(403, 'not authorized')
+    }
+  }
+
+  const req = await readJson<SetSummaryReq>(reqMsg)
+  const summary = normalizeSummary(req.summary)
+  if (!summary) {
+    await dbClearSummary(t3)
+    return {}
+  }
+  await dbSetSummary(t3, summary)
+  return {summary}
 }
 
 /**
@@ -862,6 +923,17 @@ function normalizeCategory(category: string): string {
 
 function normalizeDescription(description: string): string {
   return capped(description.trim(), PinDescriptionMaxLen, 'description')
+}
+
+/**
+ * A Map's Summary, refused rather than stored when it runs past its ceiling.
+ * Typed as a string and checked as though it were not, for {@link
+ * normalizeTitle}'s reason: the type is a claim about a body this route did not
+ * write. An empty result is the clear, not a failure.
+ */
+function normalizeSummary(summary: string): string {
+  const trimmed = typeof summary === 'string' ? summary.trim() : ''
+  return capped(trimmed, MapSummaryMaxLen, 'summary')
 }
 
 function capped(value: string, maxLen: number, field: string): string {

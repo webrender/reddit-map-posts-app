@@ -18,6 +18,8 @@ export type MapData = {
    */
   ownerName: string
   collaborative: boolean
+  /** The Map's Summary, absent where none has been written. See ADR-0020. */
+  summary?: string
   pins: Pin[]
 }
 
@@ -27,21 +29,26 @@ export type MapData = {
  * other the way a single read-modify-write of one JSON blob would.
  */
 export async function dbGetMap(t3: T3): Promise<MapData | undefined> {
-  const [ownerId, kind, metaJson, pinsHash] = await Promise.all([
+  const [ownerId, kind, summary, metaJson, pinsHash] = await Promise.all([
     redis.get(ownerKey(t3)),
     redis.get(kindKey(t3)),
+    redis.get(summaryKey(t3)),
     redis.hGet(INDEX_META_KEY, t3),
     redis.hGetAll(pinsKey(t3)),
   ])
   if (!ownerId) return undefined
   const pins = Object.values(pinsHash).map(json => JSON.parse(json) as Pin)
   const ownerName = metaJson ? (JSON.parse(metaJson) as IndexMeta).author : ''
-  return {
+  const map: MapData = {
     ownerId: ownerId as T2,
     ownerName,
     collaborative: kind === MapKind.Collaborative,
     pins,
   }
+  // Absent rather than empty: a Map with no Summary and a Map whose Summary is
+  // a blank string are the same Map, and only one of them is a fact.
+  if (summary) map.summary = summary
+  return map
 }
 
 /**
@@ -60,6 +67,23 @@ export async function dbGetMapMeta(
   ])
   if (!ownerId) return undefined
   return {ownerId: ownerId as T2, collaborative: kind === MapKind.Collaborative}
+}
+
+/**
+ * Writes the Map's Summary. Unlike a Pin this is a single value with a single
+ * writer at a time and no id to collide on, so it is a plain `set` — last write
+ * wins between an Owner and a Moderator, the same posture {@link dbUpdatePin}
+ * takes and for the same reason. See ADR-0020.
+ */
+export async function dbSetSummary(t3: T3, summary: string): Promise<void> {
+  await requireOwnerExists(t3)
+  await redis.set(summaryKey(t3), summary)
+}
+
+/** Forgets it, putting the Map back to having nothing to say about itself. */
+export async function dbClearSummary(t3: T3): Promise<void> {
+  await requireOwnerExists(t3)
+  await redis.del(summaryKey(t3))
 }
 
 export async function dbCreateMap(
@@ -296,6 +320,7 @@ export async function dbDeleteMap(t3: T3): Promise<void> {
     redis.del(ownerKey(t3)),
     redis.del(pinsKey(t3)),
     redis.del(kindKey(t3)),
+    redis.del(summaryKey(t3)),
   ])
 }
 
@@ -382,6 +407,16 @@ function pinsKey(t3: T3): string {
  */
 function kindKey(t3: T3): string {
   return `kind:${t3}`
+}
+
+/**
+ * Holds the Map's Summary, and is absent where none has been written. Its own
+ * key for {@link kindKey}'s reason: `owner:{t3}`'s mere existence is what
+ * {@link dbIsMap} reads to tell a Map Post from an Index Post, and nothing else
+ * may ever be overloaded onto it.
+ */
+function summaryKey(t3: T3): string {
+  return `summary:${t3}`
 }
 
 async function requireOwnerExists(t3: T3): Promise<void> {

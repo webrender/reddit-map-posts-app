@@ -20,7 +20,7 @@
       height: 100dvh;
       overflow: hidden;
       /* Nothing inside the Post scrolls, and saying so keeps the host from
-             waiting on a touch to find out. */
+                     waiting on a touch to find out. */
       overscroll-behavior: none;
       font-family: system-ui, sans-serif;
       background: var(--bg);
@@ -28,10 +28,10 @@
       -webkit-tap-highlight-color: transparent;
     }
     /* ...except a Preview, which must chain its refusal to nobody: an inline
-           Post that swallows a drag swallows the feed's scroll with it, which is
-           the one thing it may never do. The root element is what the viewport
-           takes this from, hence reaching it through the body's class. See
-           ADR-0007. */
+                   Post that swallows a drag swallows the feed's scroll with it, which is
+                   the one thing it may never do. The root element is what the viewport
+                   takes this from, hence reaching it through the body's class. See
+                   ADR-0007. */
     html:has(body.preview),
     body.preview {
       overscroll-behavior: auto;
@@ -47,10 +47,10 @@
       height: 100%;
     }
     /* The Preview is the Map and one button: everything else the toolbar opens
-           — the Sidebar, the dialog, the status line — is unreachable rather than
-           hidden, since nothing inline can reach it. The button floats over the Map
-           rather than claiming a row of its own, so the Map fills the Preview the
-           same way it fills full screen. */
+                   — the Sidebar, the dialog, the status line — is unreachable rather than
+                   hidden, since nothing inline can reach it. The button floats over the Map
+                   rather than claiming a row of its own, so the Map fills the Preview the
+                   same way it fills full screen. */
     body.preview #app {
       grid-template-rows: 1fr;
       grid-template-areas: 'map';
@@ -64,8 +64,8 @@
       background: var(--bg);
       border-bottom: 1px solid var(--border);
       /* Above the Map, which is full of positioned elements of MapLibre's own:
-             the tooltips below hang past the toolbar's own edge and would
-             otherwise be drawn under the tiles. */
+                     the tooltips below hang past the toolbar's own edge and would
+                     otherwise be drawn under the tiles. */
       position: relative;
       z-index: 7;
     }
@@ -73,11 +73,11 @@
       display: none;
     }
     /* The three faces of the toolbar: the controls, the default-map-area row,
-           and the category filter — each of the latter two taking the controls'
-           place while it is open. Only ever one of them is in the flow, and none of
-           them wraps, so the toolbar keeps its one-row height whichever is showing.
-           The Sidebar toggle lives outside all three, so it survives whichever face
-           is up. */
+                   and the category filter — each of the latter two taking the controls'
+                   place while it is open. Only ever one of them is in the flow, and none of
+                   them wraps, so the toolbar keeps its one-row height whichever is showing.
+                   The Sidebar toggle lives outside all three, so it survives whichever face
+                   is up. */
     #toolbar-main,
     #toolbar-area,
     #toolbar-filter {
@@ -88,7 +88,7 @@
       min-width: 0;
     }
     /* Pushes the controls to the end of the row now that the Sidebar toggle
-           sits outside this face rather than at its start. */
+                   sits outside this face rather than at its start. */
     #toolbar-main {
       justify-content: flex-end;
     }
@@ -141,25 +141,25 @@
       outline: none;
     }
     /* Said explicitly because the `display` above outranks the user agent's
-           `[hidden]` rule, and hiding two of the three faces is the whole
-           mechanism. */
+                   `[hidden]` rule, and hiding two of the three faces is the whole
+                   mechanism. */
     #toolbar-main[hidden],
     #toolbar-area[hidden],
     #toolbar-filter[hidden] {
       display: none;
     }
     /* Open, the filter is the whole toolbar: the select takes every pixel the
-           close button leaves, so long category names are readable on a phone. The
-           width is overridden because the rule above sets 100%, which here is a
-           whole row on its own with the button wrapped below. */
+                   close button leaves, so long category names are readable on a phone. The
+                   width is overridden because the rule above sets 100%, which here is a
+                   whole row on its own with the button wrapped below. */
     #category-filter {
       flex: 1 1 auto;
       width: auto;
       min-width: 0;
     }
     /* Square, the same shape as the Sidebar toggle holding the other end of the
-           toolbar. All of them carry an icon rather than a label so that a narrow
-           device still fits the whole row on one line. */
+                   toolbar. All of them carry an icon rather than a label so that a narrow
+                   device still fits the whole row on one line. */
     #add-pin-btn,
     #area-btn,
     #pins-io-btn,
@@ -182,11 +182,11 @@
       height: 1.25rem;
     }
     /* Every control in this row is an icon, so on a pointer device each one
-           says what it is underneath itself. The text is read off the accessible
-           name rather than written a second time, which also picks up the Sidebar
-           toggle rewriting its own as the Pin count changes. Withheld from touch,
-           where there is no hover to end and the label would be left standing over
-           the Map. */
+                   says what it is underneath itself. The text is read off the accessible
+                   name rather than written a second time, which also picks up the Sidebar
+                   toggle rewriting its own as the Pin count changes. Withheld from touch,
+                   where there is no hover to end and the label would be left standing over
+                   the Map. */
     @media (hover: hover) and (pointer: fine) {
       #toolbar button[aria-label] {
         position: relative;
@@ -195,15 +195,15 @@
         content: attr(aria-label);
         position: absolute;
         /* Hung from the end of the row, which is the edge all of these buttons
-               but one sit against, so a long label grows inwards over the Map
-               rather than off the side of the Post. */
+                       but one sit against, so a long label grows inwards over the Map
+                       rather than off the side of the Post. */
         top: calc(100% + 0.5rem);
         right: 0;
         z-index: 8;
         padding: 0.25rem 0.5rem;
         border-radius: var(--radius-sm);
         /* Inverted, the only surface in the app that is: a label about a
-               control, not another control. */
+                       control, not another control. */
         background: var(--text);
         color: var(--bg);
         box-shadow: var(--shadow);
@@ -211,29 +211,29 @@
         font-weight: 500;
         white-space: nowrap;
         /* Advisory only, like the status line: whatever is underneath keeps
-               the pointer. */
+                       the pointer. */
         pointer-events: none;
         opacity: 0;
         transition: opacity 0.12s ease;
       }
       /* Delayed on the way in, so crossing the toolbar to reach one button
-             doesn't light up the ones passed over, and immediate on the way out. */
+                     doesn't light up the ones passed over, and immediate on the way out. */
       #toolbar button[aria-label]:hover::after,
       #toolbar button[aria-label]:focus-visible::after {
         opacity: 1;
         transition-delay: 0.35s;
       }
       /* The toggle holds the other end of the row, so its own label hangs from
-             the edge it is nearest instead. */
+                     the edge it is nearest instead. */
       #toolbar #sidebar-toggle::after {
         right: auto;
         left: 0;
       }
     }
     /* The default-map-area face is two labelled buttons and a close: the
-           instruction that would otherwise label them is said over the Map, where
-           the framing the moderator is being asked for actually happens. The first
-           takes the slack so the pair reads as an action and its undo. */
+                   instruction that would otherwise label them is said over the Map, where
+                   the framing the moderator is being asked for actually happens. The first
+                   takes the slack so the pair reads as an action and its undo. */
     #area-save-btn {
       flex: 1 1 auto;
       min-width: 0;
@@ -252,8 +252,8 @@
       white-space: nowrap;
     }
     /* Accented while it is doing something: waiting for the click that drops a
-           Pin, or — since the filter's own control is hidden behind the icon —
-           holding a filter that is narrowing what the Map and the Sidebar show. */
+                   Pin, or — since the filter's own control is hidden behind the icon —
+                   holding a filter that is narrowing what the Map and the Sidebar show. */
     #add-pin-btn[aria-pressed='true'],
     #filter-btn.filtering {
       border-color: var(--accent);
@@ -266,29 +266,29 @@
       background: var(--accent-hover);
     }
     /* The one control on this row that is a moderator's rather than any
-           member's, and the only one that changes what everybody sees before they
-           have touched anything — so it carries the accent on its edge at rest,
-           where the others take a colour only while they are doing something. It
-           leads the row for the same reason: it is a different kind of act from
-           the ones that follow it. */
+                   member's, and the only one that changes what everybody sees before they
+                   have touched anything — so it carries the accent on its edge at rest,
+                   where the others take a colour only while they are doing something. It
+                   leads the row for the same reason: it is a different kind of act from
+                   the ones that follow it. */
     #area-btn {
       border-color: var(--accent);
     }
 
     /* Positive capability classes, all absent by default — which is what makes
-           the fail-closed boot state in map.ts need no class added at all, and
-           what a Contributor's toolbar (able to add, unable to import/export or
-           delete) needs that a single .viewer-mode never could: three independent
-           facts, not one mode switched on or off.
+                   the fail-closed boot state in map.ts need no class added at all, and
+                   what a Contributor's toolbar (able to add, unable to import/export or
+                   delete) needs that a single .viewer-mode never could: three independent
+                   facts, not one mode switched on or off.
 
-           can-add-pin: may drop a Pin — the Owner on a Solo Map, any logged-in
-           member on a Collaborative one. Paired with .collaborative below, which
-           is what keeps Add a Pin on screen for a logged-out reader too (see
-           ADR-0019) — canAddPin alone would leave a visible control with no
-           handler, worse than hiding it.
-           owns-map: Import/Export and Delete Map — the Owner, on either kind.
-           collaborative: a fact about the Map, not the reader — needed for the
-           byline and empty-state copy as well as the rule above. */
+                   can-add-pin: may drop a Pin — the Owner on a Solo Map, any logged-in
+                   member on a Collaborative one. Paired with .collaborative below, which
+                   is what keeps Add a Pin on screen for a logged-out reader too (see
+                   ADR-0019) — canAddPin alone would leave a visible control with no
+                   handler, worse than hiding it.
+                   owns-map: Import/Export and Delete Map — the Owner, on either kind.
+                   collaborative: a fact about the Map, not the reader — needed for the
+                   byline and empty-state copy as well as the rule above. */
     body:not(.can-add-pin):not(.collaborative) #add-pin-btn {
       display: none;
     }
@@ -296,8 +296,8 @@
       display: none;
     }
     /* The only irreversible thing in the app, so it is the only control that
-           wears the danger colour — and it wears it only on hover, because a
-           toolbar that is red at rest reads as an error rather than an action. */
+                   wears the danger colour — and it wears it only on hover, because a
+                   toolbar that is red at rest reads as an error rather than an action. */
     #delete-post-btn:hover {
       border-color: var(--danger);
       background: var(--danger);
@@ -311,21 +311,21 @@
       width: 100%;
       height: 100%;
       /* MapLibre already claims the gestures on its own canvas container; this
-             says the same thing one level up, so a touch that starts on the Map is
-             never a candidate for scrolling anything. */
+                     says the same thing one level up, so a touch that starts on the Map is
+                     never a candidate for scrolling anything. */
       touch-action: none;
     }
     /* A Preview claims neither: MapLibre wires up no handler, so it marks no
-           canvas, and the Map hands every touch that lands on it straight back to
-           the feed. */
+                   canvas, and the Map hands every touch that lands on it straight back to
+                   the feed. */
     body.preview #map {
       touch-action: auto;
     }
     /* The one thing a Preview offers, in the accent that means "act" everywhere
-           else on the page. Floats over the Map rather than sitting in a section
-           below it, sized as a fraction of the view rather than full width so it
-           reads as a control on the Map instead of a bar under it, and capped so it
-           doesn't sprawl on a wide Post. */
+                   else on the page. Floats over the Map rather than sitting in a section
+                   below it, sized as a fraction of the view rather than full width so it
+                   reads as a control on the Map instead of a bar under it, and capped so it
+                   doesn't sprawl on a wide Post. */
     #open-map-btn {
       grid-area: map;
       justify-self: center;
@@ -350,15 +350,15 @@
       display: none;
     }
     /* What the Map itself has to say — the instruction while a Pin is being
-           dropped, and the failures of the actions taken on the Map rather than in
-           the toolbar. It sits over the Map instead of in the toolbar because the
-           toolbar row is full, and because two of its three faces are hidden at any
-           moment while a message can arrive under any of them. */
+                   dropped, and the failures of the actions taken on the Map rather than in
+                   the toolbar. It sits over the Map instead of in the toolbar because the
+                   toolbar row is full, and because two of its three faces are hidden at any
+                   moment while a message can arrive under any of them. */
     /* Scoped to :not([hidden]) for the same reason #pin-image-preview is: an id
-                           selector setting `display` outranks the user agent's
-                           `[hidden] {display: none}`. The pill is hidden from script rather than by
-                           `:empty`, because it is no longer empty when it has nothing to say — the
-                           help button is a child of it. */
+                                   selector setting `display` outranks the user agent's
+                                   `[hidden] {display: none}`. The pill is hidden from script rather than by
+                                   `:empty`, because it is no longer empty when it has nothing to say — the
+                                   help button is a child of it. */
     #map-status:not([hidden]) {
       display: flex;
       align-items: center;
@@ -379,14 +379,14 @@
       font-size: 0.75rem;
       color: var(--text);
       /* Advisory only: the Map underneath keeps every click and drag. The help
-                             button takes its own clicks back below. */
+                                     button takes its own clicks back below. */
       pointer-events: none;
     }
     #map-status-text {
       margin: 0;
     }
     /* Round, the size of the line it sits on, and the one part of the status
-                           line that is not advisory — so it is the one part that takes a click. */
+                                   line that is not advisory — so it is the one part that takes a click. */
     #map-status-help {
       flex: 0 0 auto;
       width: 1.25rem;
@@ -399,8 +399,8 @@
       pointer-events: auto;
     }
     /* Narrow: the Sidebar overlays the Map from the left, leaving a strip of
-        Map exposed to tap on to dismiss it. Wide (see the media query): it takes a
-        column of its own, so it never covers what it points at. */
+                Map exposed to tap on to dismiss it. Wide (see the media query): it takes a
+                column of its own, so it never covers what it points at. */
     #sidebar {
       grid-area: map;
       justify-self: start;
@@ -425,7 +425,7 @@
       body.sidebar-open #sidebar {
         grid-area: sidebar;
         /* Fill the column rather than shrinking to the widest Pin Card, which
-               is what justify-self: start would otherwise do here. */
+                       is what justify-self: start would otherwise do here. */
         justify-self: stretch;
         width: auto;
       }
@@ -453,9 +453,9 @@
       color: var(--text-muted);
     }
     /* When there is only one category, no .pin-group-heading is rendered and
-           its padding — which is what actually holds the first card off the top
-           edge in the grouped case — goes with it, so the first card needs its
-           own top margin to match. */
+                   its padding — which is what actually holds the first card off the top
+                   edge in the grouped case — goes with it, so the first card needs its
+                   own top margin to match. */
     #pin-list > .pin-group:first-child > .pin-card:first-child {
       margin-top: 0.5rem;
     }
@@ -502,21 +502,21 @@
       font-weight: 600;
     }
     /* Said explicitly for the same reason the `button` rule is: the
-                       `display: inline-block` above outranks the user agent's `[hidden]`. */
+                               `display: inline-block` above outranks the user agent's `[hidden]`. */
     .category-swatch[hidden] {
       display: none;
     }
     /* Beside the select, the swatch is the answer to "which of these pins did I
-                       just narrow to" — the filter is the one place a Category is named without
-                       a Pin Card or a heading already carrying its colour. */
+                               just narrow to" — the filter is the one place a Category is named without
+                               a Pin Card or a heading already carrying its colour. */
     #filter-swatch {
       width: 0.625rem;
       height: 0.625rem;
       margin-left: 0.125rem;
     }
     /* The one thing that says which colour on the Map means which Category.
-                       A ring in the surface colour keeps it legible where the colour it shows
-                       is close to whatever it is sitting on, in either theme. */
+                               A ring in the surface colour keeps it legible where the colour it shows
+                               is close to whatever it is sitting on, in either theme. */
     .category-swatch {
       display: inline-block;
       flex: none;
@@ -544,19 +544,21 @@
       color: var(--text-muted);
     }
     /* A Collaborative Map only — see the `collaborative` check in sidebar.ts.
-           Placed like a second, quieter line under the title row rather than a
-           chip, since it names a person rather than labelling the Pin the way the
-           Category chip does. */
+                   Placed like a second, quieter line under the title row rather than a
+                   chip, since it names a person rather than labelling the Pin the way the
+                   Category chip does. */
     .pin-card-author {
       margin: 0.2rem 0 0;
       font-size: 0.75rem;
       color: var(--text-muted);
     }
+    /* No `white-space: pre-wrap` any more: the Markdown renderer produces the
+               line breaks itself, and leaving the property would double every one of
+               them. See ADR-0020. */
     .pin-card-description {
       margin: 0.4rem 0 0;
       font-size: 0.8125rem;
       color: var(--text-muted);
-      white-space: pre-wrap;
     }
     .pin-card-link {
       flex: 0 0 auto;
@@ -580,6 +582,59 @@
       padding: 0 0.75rem;
       font-size: 0.75rem;
     }
+    /* The Map's own account of itself, above the Pin Cards rather than among
+               them — it introduces the list instead of being an item in it, and it
+               lives outside #pin-list because renderSidebar() replaces that element's
+               children on every filter change. See ADR-0020. */
+    #map-summary {
+      padding: 0.75rem 0.5rem;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.8125rem;
+    }
+    #map-summary-body:empty {
+      display: none;
+    }
+    #map-summary-edit {
+      min-height: 1.75rem;
+      padding: 0 0.75rem;
+      font-size: 0.75rem;
+    }
+    /* Both said explicitly, for the reason #toolbar-main[hidden] is: the
+               `button` rule's `display` is an author declaration and outranks the user
+               agent's `[hidden] {display: none}`, so neither the attribute nor the
+               capability class would hide this without them. */
+    #map-summary-edit[hidden],
+    body:not(.can-edit-summary) #map-summary-edit {
+      display: none;
+    }
+    /* Rendered Markdown, wherever it appears — the Summary and a Pin Card's
+               description are the same content in two places, so they read the same
+               way. Every element named here is one `markdown.ts` can actually build;
+               there is nothing else it could emit. */
+    .markdown p {
+      margin: 0 0 0.5rem;
+    }
+    .markdown > :last-child {
+      margin-bottom: 0;
+    }
+    .markdown ul,
+    .markdown ol {
+      margin: 0 0 0.5rem;
+      padding-left: 1.25rem;
+    }
+    .markdown li {
+      margin: 0.15rem 0;
+    }
+    .markdown code {
+      padding: 0.05rem 0.25rem;
+      border-radius: var(--radius-sm);
+      background: var(--bg-hover);
+      font-family: ui-monospace, monospace;
+      font-size: 0.95em;
+    }
+    .markdown a {
+      color: var(--focus);
+    }
     dialog {
       border: 1px solid var(--border);
       border-radius: var(--radius-lg);
@@ -594,9 +649,66 @@
     }
     #pin-dialog-title,
     #link-help-title,
-    #pins-io-title {
+    #pins-io-title,
+    #summary-dialog-title {
       margin: 0 0 0.75rem;
       font-size: 1rem;
+    }
+    #summary-dialog {
+      max-width: 30rem;
+    }
+    /* What the field accepts, said where it is typed rather than in a help
+               panel of its own: the subset is small enough to fit on one line. */
+    #summary-hint {
+      margin: -0.5rem 0 0.75rem;
+      font-size: 0.75rem;
+      line-height: 1.45;
+      color: var(--text-muted);
+    }
+    #summary-form label {
+      display: block;
+      margin-bottom: 0.6rem;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+    #summary-form textarea {
+      display: block;
+      width: 100%;
+      margin-top: 0.25rem;
+      padding: 0.5rem 0.75rem;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      background: var(--bg-subtle);
+      color: var(--text);
+      font: inherit;
+      font-size: 0.8125rem;
+      line-height: 1.45;
+      resize: vertical;
+    }
+    #summary-dialog-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+    }
+    #summary-save {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: var(--on-accent);
+    }
+    #summary-save:hover {
+      border-color: var(--accent-hover);
+      background: var(--accent-hover);
+    }
+    /* Clearing is an undo, not a deletion — the Summary can be typed again —
+               so it takes the quiet end of the row rather than the danger colour
+               Delete Map wears. */
+    #summary-clear {
+      margin-right: auto;
+    }
+    #summary-clear[hidden] {
+      display: none;
     }
     #link-help-dialog p,
     #link-help-dialog li {
@@ -644,8 +756,8 @@
       border-radius: var(--radius-sm);
     }
     /* Scoped to :not([hidden]): an id selector setting `display` outranks the
-           user agent's `[hidden] {display: none}`, which would otherwise keep a
-           previous Pin's preview on screen after the property is set. */
+                   user agent's `[hidden] {display: none}`, which would otherwise keep a
+                   previous Pin's preview on screen after the property is set. */
     #pin-image-preview:not([hidden]) {
       display: block;
     }
@@ -675,10 +787,10 @@
       font-size: 0.75rem;
     }
     /* Import and Export in one dialog, because they are one idea seen from
-                           either end: the text Export writes is the text Import reads, and putting
-                           them side by side is what makes that obvious without saying it. Wider
-                           than the other two, since both fields hold JSON that has to be legible
-                           enough to check before it is copied or pasted. */
+                                   either end: the text Export writes is the text Import reads, and putting
+                                   them side by side is what makes that obvious without saying it. Wider
+                                   than the other two, since both fields hold JSON that has to be legible
+                                   enough to check before it is copied or pasted. */
     #pins-io-dialog {
       max-width: 34rem;
     }
@@ -705,11 +817,11 @@
       line-height: 1.4;
       resize: vertical;
       /* Wraps rather than scrolling sideways: the Owner is reading this to
-                             check it, not to admire the line breaks. */
+                                     check it, not to admire the line breaks. */
       white-space: pre-wrap;
     }
     /* Export is above Import and separated by a rule, so the dialog reads as
-                           two actions rather than one form with four controls. */
+                                   two actions rather than one form with four controls. */
     #pins-io-import {
       margin-top: 1rem;
       padding-top: 1rem;
@@ -738,8 +850,8 @@
       margin-top: 0.75rem;
     }
     /* What the dialog has to say about the last thing tried in it — a copy that
-                           the sandbox refused, a count that landed, an entry that could not be
-                           read. It takes the width the buttons leave, and says nothing at rest. */
+                                   the sandbox refused, a count that landed, an entry that could not be
+                                   read. It takes the width the buttons leave, and says nothing at rest. */
     #pins-io-note {
       flex: 1 1 auto;
       min-width: 0;
@@ -756,10 +868,10 @@
       overflow: hidden;
     }
     /* A Pin's Title, riding inside its marker's own element so it follows the
-           marker everywhere — including through a drag — without a second marker to
-           keep in step. Absolute, so it hangs off the tip without changing the box
-           MapLibre positions; capped and clipped, so one long Title can't paper
-           over the Map or the markers either side of it. */
+                   marker everywhere — including through a drag — without a second marker to
+                   keep in step. Absolute, so it hangs off the tip without changing the box
+                   MapLibre positions; capped and clipped, so one long Title can't paper
+                   over the Map or the markers either side of it. */
     .pin-label {
       position: absolute;
       top: 100%;
@@ -965,6 +1077,12 @@
         </button>
       </div>
       <aside id="sidebar" aria-label="Pins">
+        <section id="map-summary" hidden aria-label="About this map">
+          <div id="map-summary-body" class="markdown"></div>
+          <button id="map-summary-edit" type="button" hidden>
+            Edit summary
+          </button>
+        </section>
         <div id="pin-list"></div>
       </aside>
       <button id="open-map-btn" type="button">Open Map</button>
@@ -1068,6 +1186,27 @@
       <div id="pins-io-footer">
         <button id="pins-io-close" type="button">Close</button>
       </div>
+    </dialog>
+
+    <dialog id="summary-dialog">
+      <form id="summary-form">
+        <h2 id="summary-dialog-title">Summary</h2>
+        <p id="summary-hint">
+          Markdown: <code>**bold**</code>, <code>*italic*</code>,
+          <code>`code`</code>, <code>[text](https://example.com)</code>, and
+          <code>-</code>
+          lists.
+        </p>
+        <label>
+          What is this map for?
+          <textarea id="summary-text" rows="8"></textarea>
+        </label>
+        <div id="summary-dialog-actions">
+          <button id="summary-clear" type="button" hidden>Clear</button>
+          <button id="summary-cancel" type="button">Cancel</button>
+          <button id="summary-save" type="submit">Save</button>
+        </div>
+      </form>
     </dialog>
 
     <script src="map.js" type="module"></script>

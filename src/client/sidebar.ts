@@ -1,5 +1,6 @@
 import type {Pin} from '../shared/api.ts'
 import {pinColor, uncategorizedColor} from './category-color.ts'
+import {renderMarkdown} from './markdown.ts'
 
 /** A run of Pins sharing a Category, or the uncategorized run. */
 export type PinGroup = {
@@ -353,9 +354,17 @@ function pinCard(
   }
 
   if (pin.description) {
-    const description = document.createElement('p')
-    description.className = 'pin-card-description'
-    description.textContent = pin.description
+    // A div rather than a p: a description is Markdown now, and Markdown
+    // produces block content — a <p> may contain neither a <ul> nor another
+    // <p>. Nothing is parsed from HTML here, so the browser will not hoist
+    // them back out; the element is simply the honest one. See ADR-0020.
+    const description = document.createElement('div')
+    description.className = 'pin-card-description markdown'
+    description.append(
+      renderMarkdown(pin.description, {
+        onOpenLink: url => handlers.onOpenLink(url),
+      }),
+    )
     body.append(description)
   }
 

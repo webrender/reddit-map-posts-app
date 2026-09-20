@@ -24,7 +24,12 @@ import {
   type Pin,
   type UpdatePinReq,
 } from '../shared/api.ts'
-import {canAddPin, canEditPin, type MapAccess} from '../shared/permissions.ts'
+import {
+  canAddPin,
+  canEditPin,
+  canEditSummary,
+  type MapAccess,
+} from '../shared/permissions.ts'
 import {formatPinsFile, parsePinsFile} from '../shared/pins-file.ts'
 import {categoryColors, pinColor} from './category-color.ts'
 import {
@@ -35,12 +40,14 @@ import {
   fetchGetMap,
   fetchImportPins,
   fetchSetDefaultArea,
+  fetchSetSummary,
   fetchUpdatePin,
   fetchUpdatePinResult,
   installProxyProtocol,
   proxyExternalUrl,
 } from './fetch.ts'
 import {parseMapLink} from './map-link.ts'
+import {renderMarkdown} from './markdown.ts'
 import {
   filterPins,
   initSidebar,
@@ -141,6 +148,30 @@ const pinsIoCloseBtn = document.getElementById(
 const pinsIoNote = document.getElementById(
   'pins-io-note',
 ) as HTMLParagraphElement
+
+const mapSummary = document.getElementById('map-summary') as HTMLElement
+const mapSummaryBody = document.getElementById(
+  'map-summary-body',
+) as HTMLDivElement
+const mapSummaryEditBtn = document.getElementById(
+  'map-summary-edit',
+) as HTMLButtonElement
+const summaryDialog = document.getElementById(
+  'summary-dialog',
+) as HTMLDialogElement
+const summaryForm = document.getElementById('summary-form') as HTMLFormElement
+const summaryText = document.getElementById(
+  'summary-text',
+) as HTMLTextAreaElement
+const summaryClearBtn = document.getElementById(
+  'summary-clear',
+) as HTMLButtonElement
+const summaryCancelBtn = document.getElementById(
+  'summary-cancel',
+) as HTMLButtonElement
+const summarySaveBtn = document.getElementById(
+  'summary-save',
+) as HTMLButtonElement
 
 /** Reddit's OrangeRed, the same accent the Sidebar marks a Selected Pin with. */
 const selectedMarkerColor = '#d93a00'
@@ -269,6 +300,12 @@ let access: MapAccess = {
 let ownerName = ''
 let pins: Pin[] = []
 /**
+ * The Map's own account of itself, absent where none has been written. Held
+ * here rather than read back off the DOM so that what is shown and what would
+ * be edited are the same string. See ADR-0020.
+ */
+let summary: string | undefined
+/**
  * Where a Map with nothing to frame opens, set by a moderator for the whole
  * subreddit and absent where none has. See ADR-0014.
  */
@@ -363,10 +400,12 @@ async function init(): Promise<void> {
   }
   ownerName = data.ownerName
   pins = data.pins
+  summary = data.summary
   defaultArea = data.defaultArea
   document.body.classList.toggle('collaborative', access.collaborative)
   document.body.classList.toggle('can-add-pin', canAddPin(access))
   document.body.classList.toggle('owns-map', ownsMap())
+  document.body.classList.toggle('can-edit-summary', canEditSummary(access))
   // The Preview has no toolbar to hold either of them.
   deletePostBtn.hidden = isPreview || !ownsMap()
   pinsIoBtn.hidden = isPreview || !ownsMap()
@@ -398,6 +437,7 @@ async function init(): Promise<void> {
   })
 
   renderCategoryOptions()
+  renderSummary()
   render()
   // Open where there is room for a column and something to list; a narrow
   // viewport or an empty Map both start collapsed.
@@ -454,6 +494,59 @@ function render(): void {
   // Losing the Selected Pin to a filter or a deletion lands in the same place
   // as letting go of it deliberately: the whole Map.
   if (previouslySelected && !selectedPinId) fitToPins(true)
+}
+
+/**
+ * Paints the Summary at the top of the Sidebar, and decides whether the block
+ * is there at all: a reader who cannot write one and is looking at a Map that
+ * has none gets no empty box, while whoever may write one is always offered the
+ * control. A Preview never reaches this — `init` returns before the Sidebar
+ * exists — which is how ADR-0007 stays true without a check of its own.
+ */
+function renderSummary(): void {
+  const canEdit = canEditSummary(access)
+  mapSummary.hidden = !summary && !canEdit
+  mapSummaryEditBtn.hidden = !canEdit
+  mapSummaryEditBtn.textContent = summary ? 'Edit summary' : 'Add a summary'
+  mapSummaryBody.replaceChildren()
+  if (summary) {
+    mapSummaryBody.append(
+      renderMarkdown(summary, {onOpenLink: url => navigateTo(url)}),
+    )
+  }
+}
+
+/**
+ * Opens the Summary for editing, showing what is stored rather than what is on
+ * screen — the two are the same string, and the rendered one has lost its
+ * markup. An armed drop is disarmed on the way in for the reason Import and
+ * Export disarm one: the document-level paste listener would otherwise take a
+ * paste meant for this field.
+ */
+function openSummaryDialog(): void {
+  stopDroppingPin()
+  summaryText.value = summary ?? ''
+  summaryClearBtn.hidden = !summary
+  summaryDialog.showModal()
+  summaryText.focus()
+}
+
+/**
+ * Writes it, and paints what actually landed rather than what was typed — the
+ * server trims and may refuse, and the response carries the stored value or
+ * nothing at all where it was cleared.
+ */
+async function saveSummary(): Promise<void> {
+  summarySaveBtn.disabled = true
+  const rsp = await fetchSetSummary({summary: summaryText.value})
+  summarySaveBtn.disabled = false
+  if (!rsp) {
+    flashStatus('Could not save the summary.')
+    return
+  }
+  summary = rsp.summary
+  renderSummary()
+  summaryDialog.close()
 }
 
 /**
@@ -1254,6 +1347,24 @@ async function confirmDeletePost(): Promise<void> {
 
 function wireEvents(): void {
   wireDeletePost()
+
+  // Wired above the Pin gates below, which it does not answer to: writing a
+  // Summary is the Owner's or a Moderator's, and neither of those is what
+  // `canReachPinControls` or `ownsMap()` is asking about. See ADR-0020.
+  if (canEditSummary(access)) {
+    mapSummaryEditBtn.addEventListener('click', () => openSummaryDialog())
+    summaryForm.addEventListener('submit', ev => {
+      ev.preventDefault()
+      void saveSummary()
+    })
+    summaryCancelBtn.addEventListener('click', () => summaryDialog.close())
+    // Clearing goes through the same save, so there is one path that writes a
+    // Summary and one that paints the answer.
+    summaryClearBtn.addEventListener('click', () => {
+      summaryText.value = ''
+      void saveSummary()
+    })
+  }
 
   filterBtn.addEventListener('click', () => setToolbarFace('filter'))
   filterCloseBtn.addEventListener('click', () => setToolbarFace('main'))

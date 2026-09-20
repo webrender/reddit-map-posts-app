@@ -163,6 +163,13 @@ export type GetMapRsp = {
    * had any, and it should land in the same place.
    */
   defaultArea?: MapBounds
+  /**
+   * The Map's Summary, absent where none has been written — absent rather than
+   * `''`, the shape {@link defaultArea} and {@link IndexEntry.collaborative}
+   * already use. It rides along with every reading that asks for the Map, but
+   * only the full screen one has a Sidebar to put it in. See ADR-0020.
+   */
+  summary?: string
 }
 
 /**
@@ -221,6 +228,20 @@ export type SetDefaultAreaRsp = {ok: true}
  */
 export type ClearDefaultAreaReq = Record<string, never>
 export type ClearDefaultAreaRsp = {ok: true}
+
+/**
+ * Writes this Map's Summary. It names no Map, for the reason every Pin route
+ * does not: the Map is the Post the request came from. An empty string clears
+ * it, the same way an emptied field clears a Pin's description.
+ */
+export type SetSummaryReq = {summary: string}
+
+/**
+ * What is now stored — absent where the Summary was cleared. It answers with
+ * the stored value rather than `{ok: true}` so the Sidebar paints what landed
+ * instead of what was typed, the way an Add or Update answers with the Pin.
+ */
+export type SetSummaryRsp = {summary?: string}
 
 /** One Map Post's row in an Index Post's Listing. */
 export type IndexEntry = {
@@ -464,6 +485,16 @@ export type IndexPostFormReq = {title?: string}
 /** Reddit's own cap on the length of a post title. */
 export const PostTitleMaxLen = 300
 
+/**
+ * The ceiling on a Map's Summary. Generous next to a Pin's description
+ * (`PinDescriptionMaxLen`, 2000) because one Summary speaks for a whole Map
+ * where a description speaks for one Pin, and because Markdown spends
+ * characters on markup that a reader never sees. It lives here rather than in
+ * `pins-file.ts` — a Summary is not a Pin and never appears in an Export — and
+ * both ends need the number.
+ */
+export const MapSummaryMaxLen = 4000
+
 export type Endpoint = (typeof Endpoint)[keyof typeof Endpoint]
 export const Endpoint = {
   /** `?full=1` from the reading that can use a moderator answer. */
@@ -477,6 +508,8 @@ export const Endpoint = {
   SetDefaultArea: 'api/area/set',
   /** Forget it, so empty Maps open on the whole world again. Mods only. */
   ClearDefaultArea: 'api/area/clear',
+  /** Write this Map's Summary. Owner, or a Moderator on a Collaborative Map. */
+  SetSummary: 'api/summary/set',
   /** `?url=` an allowlisted external URL; the server fetches and forwards it. */
   Proxy: 'api/proxy',
   /** `?q=&sort=&page=` one page of an Index Post's Listing. */
@@ -502,6 +535,7 @@ export const EndpointMethod = {
   [Endpoint.ImportPins]: 'POST',
   [Endpoint.SetDefaultArea]: 'POST',
   [Endpoint.ClearDefaultArea]: 'POST',
+  [Endpoint.SetSummary]: 'POST',
   [Endpoint.Proxy]: 'GET',
   [Endpoint.GetIndex]: 'GET',
   [Endpoint.CreateMapPost]: 'POST',
