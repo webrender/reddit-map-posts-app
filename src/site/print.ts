@@ -6,7 +6,13 @@ import {renderMarkdown} from '../client/markdown.ts'
 import {regionBounds, regionCentroid, regionRing} from '../client/region.ts'
 import type {LatLng, MapBounds, Pin, Region} from '../shared/api.ts'
 import {parseMapFile} from '../shared/map-file.ts'
-import {type NumberedPin, type Plan, planPrint, type Section} from './plan.ts'
+import {
+  type NumberedPin,
+  type Plan,
+  planPrint,
+  type Section,
+  showsOverview,
+} from './plan.ts'
 
 const styleUrl = 'https://tiles.openfreemap.org/styles/bright'
 const attribution = '© OpenStreetMap contributors · OpenFreeMap · MapLibre'
@@ -22,7 +28,6 @@ const papers = {
 type PaperName = keyof typeof papers
 
 const jsonEl = byId<HTMLTextAreaElement>('json')
-const titleEl = byId<HTMLInputElement>('title')
 const paperEl = byId<HTMLSelectElement>('paper')
 const renderBtn = byId<HTMLButtonElement>('render-btn')
 const printBtn = byId<HTMLButtonElement>('print-btn')
@@ -90,11 +95,10 @@ async function render(): Promise<void> {
   }
   applyPaper()
   const plan = planPrint(read)
-  const title = titleEl.value.trim() || 'My map'
-  document.title = `${title} · print view`
 
   const jobs: MapJob[] = []
-  pagesEl.append(overviewUnit(plan, title, jobs))
+  const overview = showsOverview(plan)
+  if (overview) pagesEl.append(overviewUnit(plan, jobs))
   if (read.summary) pagesEl.append(summaryUnit(read.summary))
   for (const section of plan.sections) {
     pagesEl.append(mapUnit(plan, section, jobs))
@@ -126,15 +130,10 @@ async function render(): Promise<void> {
   setStatus(`Ready to print.${dropped}`)
 }
 
-function overviewUnit(plan: Plan, title: string, jobs: MapJob[]): HTMLElement {
+function overviewUnit(plan: Plan, jobs: MapJob[]): HTMLElement {
   const unit = el('section', 'unit')
   const frame = el('div', 'map-frame')
   unit.append(frame)
-  const heading = el('div', 'map-title')
-  heading.append(el('h1', undefined, title))
-  const count = plan.pins.length
-  heading.append(el('p', undefined, `${count} place${count === 1 ? '' : 's'}`))
-  frame.append(heading)
   jobs.push({
     frame,
     regions: plan.regions,
@@ -159,13 +158,11 @@ function mapUnit(plan: Plan, section: Section, jobs: MapJob[]): HTMLElement {
   const frame = el('div', 'map-frame')
   unit.append(frame)
   if (section.name) {
-    const heading = el('div', 'map-title')
-    heading.append(el('h2', undefined, section.name))
+    const chip = el('div', 'map-title')
+    chip.append(el('h2', undefined, section.name))
     const count = section.pins.length
-    heading.append(
-      el('p', undefined, `${count} place${count === 1 ? '' : 's'}`),
-    )
-    frame.append(heading)
+    chip.append(el('p', undefined, `${count} place${count === 1 ? '' : 's'}`))
+    frame.append(chip)
   }
   jobs.push({
     frame,

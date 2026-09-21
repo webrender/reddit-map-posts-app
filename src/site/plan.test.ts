@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import {test} from 'node:test'
 import type {PinExport, RegionExport} from '../shared/map-file.ts'
-import {elsewhereName, planPrint} from './plan.ts'
+import {elsewhereName, planPrint, showsOverview} from './plan.ts'
 
 function pin(
   title: string,
@@ -100,4 +100,12 @@ test('an older Category keeps the colour it would have on the Map', () => {
     plan.categoryColors.get('Food'),
     plan.categoryColors.get('Temples'),
   )
+})
+
+test('the overview is only for a Map with more than one Region', () => {
+  const south: RegionExport = {...north, name: 'South'}
+  const pins = [pin('A', 15, 5)]
+  assert.equal(showsOverview(planPrint({pins})), false)
+  assert.equal(showsOverview(planPrint({pins, regions: [north]})), false)
+  assert.equal(showsOverview(planPrint({pins, regions: [north, south]})), true)
 })

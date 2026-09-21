@@ -98,3 +98,12 @@ export function planPrint(file: {
     regionColors: regionColors(regions),
   }
 }
+
+/**
+ * Whether the overview map earns a page. It exists to show how the Regions sit
+ * against each other, so with one Region or none the Section's own map already
+ * is the whole Map and a second, less detailed one would only repeat it.
+ */
+export function showsOverview(plan: Plan): boolean {
+  return plan.regions.length > 1
+}
