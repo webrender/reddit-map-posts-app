@@ -24,7 +24,9 @@ const mapPadding = {top: 70, bottom: 50, left: 50, right: 50}
 const idleTimeoutMs = 20_000
 /** A numbered marker's diameter in CSS px; keep it in step with `.pin-badge` in print.css. */
 const badgeSize = 24
-/** Clear space kept between two markers' edges. */
+/** How far two markers' edges may overlap: their white rims, no more than that. */
+const badgeOverlap = 2
+/** Clear space kept between a marker and a Region label's edge. */
 const badgeGap = 3
 /** Half the height of a Region's label, which markers keep clear of. */
 const labelHalfHeight = 11
@@ -331,7 +333,7 @@ async function drawMap(job: MapJob): Promise<void> {
         return {x: point.x, y: point.y}
       })
       const placed = spreadPoints(truth, {
-        minDistance: badgeSize + badgeGap,
+        minDistance: badgeSize - badgeOverlap,
         width,
         height,
         margin: badgeSize / 2 + 2,
