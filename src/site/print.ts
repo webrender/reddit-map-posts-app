@@ -13,13 +13,23 @@ import {
   type Section,
   showsOverview,
 } from './plan.ts'
+import {type Point, spreadPoints} from './spread.ts'
 
+const svgNs = 'http://www.w3.org/2000/svg'
 const styleUrl = 'https://tiles.openfreemap.org/styles/bright'
 const attribution = '© OpenStreetMap contributors · OpenFreeMap · MapLibre'
 /** Each map is drawn this many times denser than the screen, so it prints sharp. */
 const pixelRatio = 3
 const mapPadding = {top: 70, bottom: 50, left: 50, right: 50}
 const idleTimeoutMs = 20_000
+/** A numbered marker's diameter in CSS px; keep it in step with `.pin-badge` in print.css. */
+const badgeSize = 24
+/** Clear space kept between two markers' edges. */
+const badgeGap = 3
+/** Half the height of a Region's label, which markers keep clear of. */
+const labelHalfHeight = 11
+/** A marker moved less than this is not worth a leader line back to where it was. */
+const leaderMinDistance = 4
 
 const papers = {
   letter: {size: 'letter', width: '7.5in', height: '10in'},
@@ -300,6 +310,7 @@ async function drawMap(job: MapJob): Promise<void> {
     if (!blob) throw new Error('the map could not be captured')
 
     const overlay = el('div', 'overlay')
+    frame.append(overlay)
     const at = (location: LatLng): [string, string] => {
       const point = map.project([location.lng, location.lat])
       return [`${(point.x / width) * 100}%`, `${(point.y / height) * 100}%`]
@@ -312,12 +323,51 @@ async function drawMap(job: MapJob): Promise<void> {
       overlay.append(label)
     }
     if (job.numbered.length) {
-      for (const {number, pin} of job.numbered) {
+      // Markers are moved apart until none overlap, so a cluster of Pins can
+      // still be told one from another. A line back to the true spot says where
+      // each one really is.
+      const truth = job.numbered.map(({pin}) => {
+        const point = map.project([pin.location.lng, pin.location.lat])
+        return {x: point.x, y: point.y}
+      })
+      const placed = spreadPoints(truth, {
+        minDistance: badgeSize + badgeGap,
+        width,
+        height,
+        margin: badgeSize / 2 + 2,
+        obstacles: labelObstacles(frame, overlay),
+        obstacleDistance: badgeSize / 2 + labelHalfHeight + badgeGap,
+      })
+      const leaders = document.createElementNS(svgNs, 'svg')
+      leaders.setAttribute('viewBox', `0 0 ${width} ${height}`)
+      leaders.setAttribute('class', 'leaders')
+      const badges: HTMLElement[] = []
+      for (const [index, {number, pin}] of job.numbered.entries()) {
+        const from = truth[index] as Point
+        const to = placed[index] as Point
+        const color = pinColorOf(plan, pin)
+        if (Math.hypot(to.x - from.x, to.y - from.y) >= leaderMinDistance) {
+          const line = document.createElementNS(svgNs, 'line')
+          line.setAttribute('x1', `${from.x}`)
+          line.setAttribute('y1', `${from.y}`)
+          line.setAttribute('x2', `${to.x}`)
+          line.setAttribute('y2', `${to.y}`)
+          line.setAttribute('class', 'leader')
+          const anchor = document.createElementNS(svgNs, 'circle')
+          anchor.setAttribute('cx', `${from.x}`)
+          anchor.setAttribute('cy', `${from.y}`)
+          anchor.setAttribute('r', '3')
+          anchor.setAttribute('class', 'leader-anchor')
+          anchor.style.fill = color
+          leaders.append(line, anchor)
+        }
         const badge = el('div', 'pin-badge', `${number}`)
-        badge.style.background = pinColorOf(plan, pin)
-        ;[badge.style.left, badge.style.top] = at(pin.location)
-        overlay.append(badge)
+        badge.style.background = color
+        badge.style.left = `${(to.x / width) * 100}%`
+        badge.style.top = `${(to.y / height) * 100}%`
+        badges.push(badge)
       }
+      overlay.append(leaders, ...badges)
     } else {
       for (const pin of job.pins) {
         const dot = el('div', 'pin-dot')
@@ -332,11 +382,30 @@ async function drawMap(job: MapJob): Promise<void> {
     image.alt = ''
     image.src = URL.createObjectURL(blob)
     frame.prepend(image)
-    frame.append(overlay, el('div', 'attribution', attribution))
+    frame.append(el('div', 'attribution', attribution))
   } finally {
     map.remove()
     holder.remove()
   }
+}
+
+/**
+ * Each Region label as a row of points down its middle, spaced closely enough
+ * that a marker kept `obstacleDistance` from every one of them clears the whole
+ * label. Measured from the page, since a label's width is the text's.
+ */
+function labelObstacles(frame: HTMLElement, overlay: HTMLElement): Point[] {
+  const origin = frame.getBoundingClientRect()
+  const points: Point[] = []
+  for (const label of overlay.querySelectorAll('.region-label')) {
+    const box = label.getBoundingClientRect()
+    const y = box.top - origin.top + box.height / 2
+    for (let x = box.left - origin.left; x <= box.right - origin.left; x += 8) {
+      points.push({x, y})
+    }
+    points.push({x: box.right - origin.left, y})
+  }
+  return points
 }
 
 function legend(plan: Plan): HTMLElement {
