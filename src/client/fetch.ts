@@ -17,6 +17,8 @@ import {
   type ImportMapRsp,
   type SetDefaultAreaReq,
   type SetDefaultAreaRsp,
+  type SetOrderReq,
+  type SetOrderRsp,
   type SetSummaryReq,
   type SetSummaryRsp,
   type UpdatePinReq,
@@ -85,6 +87,13 @@ export async function fetchImportMap(
   req: ImportMapReq,
 ): Promise<ImportMapRsp | undefined> {
   return fetchJson(Endpoint.ImportMap, req)
+}
+
+/** Writes the Map's Pin order; see `SetOrderReq`. */
+export async function fetchSetOrder(
+  req: SetOrderReq,
+): Promise<SetOrderRsp | undefined> {
+  return fetchJson(Endpoint.SetOrder, req)
 }
 
 /** Takes no arguments: the Post to delete is the one this page is running in. */

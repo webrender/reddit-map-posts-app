@@ -4,6 +4,7 @@ import type {LatLng, Pin} from '../shared/api.ts'
 import {
   filterPins,
   groupPinsByCategory,
+  numberPins,
   resolveSelection,
   showsHeadings,
 } from './sidebar.ts'
@@ -118,4 +119,29 @@ test('a selection whose Pin was deleted is cleared', () => {
 
 test('no selection stays no selection', () => {
   assert.equal(resolveSelection(undefined, [pin('1', 'Bakery')]), undefined)
+})
+
+test('numberPins: numbers run down the Sidebar and follow the Map order', () => {
+  const pins = [
+    {id: 'a', title: 'A', category: 'Cafe', location: {lat: 0, lng: 0}},
+    {id: 'b', title: 'B', category: 'Cafe', location: {lat: 0, lng: 0}},
+    {id: 'c', title: 'C', location: {lat: 0, lng: 0}},
+  ]
+  assert.deepEqual(
+    [...numberPins(pins, undefined, [])],
+    [
+      ['a', 1],
+      ['b', 2],
+      ['c', 3],
+    ],
+  )
+  // Reordering inside the Cafe group renumbers it; the uncategorized Pin stays last.
+  assert.deepEqual(
+    [...numberPins(pins, undefined, ['b', 'a'])],
+    [
+      ['b', 1],
+      ['a', 2],
+      ['c', 3],
+    ],
+  )
 })

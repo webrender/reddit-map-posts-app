@@ -674,6 +674,64 @@
       justify-content: flex-end;
       padding: 0 0.5rem 0.5rem;
     }
+    /* The Pin's place in this list, matching the number on its marker. */
+    .pin-card-number {
+      flex: none;
+      min-width: 1.25rem;
+      padding: 0 0.25rem;
+      border-radius: var(--radius-pill);
+      background: var(--accent);
+      color: var(--on-accent);
+      font-size: 0.6875rem;
+      font-weight: 700;
+      line-height: 1.25rem;
+      text-align: center;
+    }
+    /* The grabber, top right. It sits over a card's image when it has one, so it
+                       carries its own backing; touch-action none is what lets a finger drag it
+                       instead of scrolling the Sidebar. */
+    .pin-card-grip {
+      position: absolute;
+      top: 0.25rem;
+      right: 0.25rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.75rem;
+      height: 1.75rem;
+      border-radius: var(--radius-md);
+      background: var(--bg-subtle);
+      color: var(--text-muted, var(--text));
+      cursor: grab;
+      touch-action: none;
+      user-select: none;
+    }
+    .pin-card-grip:hover,
+    .pin-card-grip:focus-visible {
+      color: var(--text);
+    }
+    .pin-card.reorderable .pin-card-body {
+      padding-right: 2.25rem;
+    }
+    /* The lifted card: out of the list, following the pointer, a little
+                       translucent so the list moving underneath it can be read. What it left
+                       behind is the placeholder, which is where it will land. */
+    .pin-card.dragging {
+      position: fixed;
+      z-index: 10;
+      margin: 0;
+      opacity: 0.9;
+      box-shadow: 0 0.5rem 1.25rem rgba(0, 0, 0, 0.3);
+      pointer-events: none;
+    }
+    .pin-card-placeholder {
+      box-sizing: border-box;
+      margin-bottom: 0.5rem;
+      border: 2px dashed var(--border-strong);
+      border-radius: var(--radius-md);
+      background: var(--bg-subtle);
+      opacity: 0.6;
+    }
     .pin-card-edit {
       min-height: 1.75rem;
       padding: 0 0.75rem;
@@ -1153,6 +1211,26 @@
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+    }
+    /* The number over the head of a marker, which MapLibre draws as a 27x41 SVG
+                           whose head is centred at (13.5, 13.5). The SVG's own white dot sits
+                           exactly there and would swallow white text, so a numbered marker drops
+                           it and lets the number sit on the Category Colour. Pointer-events off
+                           so the number can never swallow the click or drag meant for the marker. */
+    .maplibregl-marker.numbered svg circle {
+      display: none;
+    }
+    .pin-number {
+      position: absolute;
+      top: 7px;
+      left: 0;
+      width: 27px;
+      text-align: center;
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 13px;
+      color: #fff;
+      pointer-events: none;
     }
     /* Marked like the marker above it, so the Selected Pin reads as one thing. */
     .pin-label.selected {

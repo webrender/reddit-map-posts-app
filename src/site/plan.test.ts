@@ -109,3 +109,11 @@ test('the overview is only for a Map with more than one Region', () => {
   assert.equal(showsOverview(planPrint({pins, regions: [north]})), false)
   assert.equal(showsOverview(planPrint({pins, regions: [north, south]})), true)
 })
+
+test('an ordered file numbers its Pins in file order, an unordered one by title', () => {
+  const pins = [pin('B', 1, 1), pin('A', 2, 2)]
+  const titles = (file: Parameters<typeof planPrint>[0]) =>
+    planPrint(file).sections[0]?.pins.map(entry => entry.pin.title)
+  assert.deepEqual(titles({pins}), ['A', 'B'])
+  assert.deepEqual(titles({pins, ordered: true}), ['B', 'A'])
+})

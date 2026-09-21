@@ -5,6 +5,7 @@ import {
   type Pin,
   type Region,
 } from './api.ts'
+import {sortPins} from './pin-order.ts'
 
 /**
  * The shape of an Export, bumped only when a reader of this version could
@@ -86,6 +87,13 @@ export type MapFile = {
   version: number
   summary?: string
   regions?: RegionExport[]
+  /**
+   * Present, and `true`, only where the Map has a hand-made Pin order and
+   * `pins` is written in it. Absent means the list's order says nothing — an
+   * Export from before ordering existed lists Pins in whatever order the server
+   * held them — so a reader must not rank Pins by it.
+   */
+  ordered?: true
   pins: PinExport[]
 }
 
@@ -100,6 +108,7 @@ export type MapFileRead =
       droppedImages: number
       summary?: string
       regions?: RegionExport[]
+      ordered?: true
     }
   | {error: string}
 
@@ -112,11 +121,15 @@ export function formatMapFile(
   pins: readonly Pin[],
   regions: readonly Region[] = [],
   summary?: string,
+  order: readonly string[] = [],
 ): string {
+  // Written in listing order, so that an Export read back — or printed — lists
+  // the Pins as the Sidebar does.
   const file: MapFile = {
     version: MapFileVersion,
-    pins: pins.map(toPinExport),
+    pins: sortPins(pins, order).map(toPinExport),
   }
+  if (order.some(id => pins.some(pin => pin.id === id))) file.ordered = true
   if (summary) file.summary = summary
   if (regions.length) file.regions = regions.map(toRegionExport)
   return `${JSON.stringify(file, undefined, 2)}\n`
@@ -175,6 +188,7 @@ export function readMapValue(value: unknown): MapFileRead {
   }
 
   const out: MapFileRead = {pins, droppedImages}
+  if (envelope.ordered === true) out.ordered = true
 
   if (envelope.regions !== undefined) {
     const regions = readRegions(envelope.regions)
@@ -250,20 +264,23 @@ function toPinExport(pin: Pin): PinExport {
  */
 function readEnvelope(
   value: unknown,
-): {pins: unknown[]; regions?: unknown; summary?: unknown} | undefined {
+):
+  | {pins: unknown[]; regions?: unknown; summary?: unknown; ordered?: unknown}
+  | undefined {
   if (Array.isArray(value)) return {pins: value}
   if (typeof value !== 'object' || value === null) return
-  const {pins, regions, summary} = value as {
+  const {pins, regions, summary, ordered} = value as {
     pins?: unknown
     regions?: unknown
     summary?: unknown
+    ordered?: unknown
   }
   if (pins === undefined) {
     if (regions === undefined && summary === undefined) return
-    return {pins: [], regions, summary}
+    return {pins: [], regions, summary, ordered}
   }
   if (!Array.isArray(pins)) return
-  return {pins, regions, summary}
+  return {pins, regions, summary, ordered}
 }
 
 /**

@@ -1,4 +1,5 @@
 import type {Pin} from '../shared/api.ts'
+import {sortPins} from '../shared/pin-order.ts'
 import {pinColor, uncategorizedColor} from './category-color.ts'
 import {renderMarkdown} from './markdown.ts'
 import type {RegionGroup} from './region.ts'
@@ -18,9 +19,13 @@ export function filterPins(pins: Pin[], category: string): Pin[] {
 
 /**
  * Groups Pins for display: Categories alphabetically, the uncategorized Pins
- * last, Pins alphabetically by title within each group.
+ * last, and within each group the Map's hand-made `order`, then by title for
+ * any Pin it does not name.
  */
-export function groupPinsByCategory(pins: Pin[]): PinGroup[] {
+export function groupPinsByCategory(
+  pins: Pin[],
+  order: readonly string[] = [],
+): PinGroup[] {
   const byCategory = new Map<string, Pin[]>()
   const uncategorized: Pin[] = []
   for (const pin of pins) {
@@ -35,9 +40,12 @@ export function groupPinsByCategory(pins: Pin[]): PinGroup[] {
 
   const groups: PinGroup[] = [...byCategory.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([category, groupPins]) => ({category, pins: sortByTitle(groupPins)}))
+    .map(([category, groupPins]) => ({
+      category,
+      pins: sortPins(groupPins, order),
+    }))
   if (uncategorized.length) {
-    groups.push({category: undefined, pins: sortByTitle(uncategorized)})
+    groups.push({category: undefined, pins: sortPins(uncategorized, order)})
   }
   return groups
 }
@@ -65,8 +73,24 @@ export function resolveSelection(
     : undefined
 }
 
-function sortByTitle(pins: Pin[]): Pin[] {
-  return [...pins].sort((a, b) => a.title.localeCompare(b.title))
+/**
+ * Every Pin's number: its place in the Sidebar read top to bottom, starting at
+ * 1. Worked out from the same grouping the Sidebar draws, so a marker's number
+ * and its card's can never disagree, and reordering a group renumbers it.
+ */
+export function numberPins(
+  pins: Pin[],
+  regionGroups: RegionGroup[] | undefined,
+  order: readonly string[],
+): Map<string, number> {
+  const numbers = new Map<string, number>()
+  for (const group of regionGroups ?? [{region: undefined, pins}]) {
+    for (const categoryGroup of groupPinsByCategory(group.pins, order)) {
+      for (const pin of categoryGroup.pins)
+        numbers.set(pin.id, numbers.size + 1)
+    }
+  }
+  return numbers
 }
 
 export type SidebarHandlers = {
@@ -74,6 +98,12 @@ export type SidebarHandlers = {
   onSelectCard(pinId: string): void
   /** A Pin Card's edit control was clicked; only where the card offered one. */
   onEditPin(pinId: string): void
+  /**
+   * A card was dragged, or nudged from the keyboard, to a new place in its
+   * group (its Region and Category). `groupIds` is the whole group in its new
+   * order, only ever raised when that differs from what was drawn.
+   */
+  onReorderGroup(groupIds: string[]): void
   /** A Pin Card's external link was clicked. */
   onOpenLink(url: string): void
   /** The Sidebar opened or closed, changing how much room the Map has. */
@@ -134,6 +164,12 @@ export type SidebarState = {
   regionGroups: RegionGroup[] | undefined
   /** Every Region's name to its colour — the whole Map's, as for Categories. */
   regionColors: Map<string, string>
+  /** The Map's hand-made Pin order; see `sortPins`. */
+  order: readonly string[]
+  /** Every visible Pin's number, as {@link numberPins} works it out. */
+  numbers: Map<string, number>
+  /** Whether this reader may reorder: `canEditMap`, decided once in `render()`. */
+  canReorder: boolean
   /** The Region the tour has reached, if it has reached one. */
   activeRegionId: string | undefined
 }
@@ -322,7 +358,7 @@ function appendPinGroups(
   pins: Pin[],
   state: SidebarState,
 ): void {
-  const groups = groupPinsByCategory(pins)
+  const groups = groupPinsByCategory(pins, state.order)
   const headings = showsHeadings(groups)
   for (const group of groups) {
     const section = document.createElement('section')
@@ -352,11 +388,159 @@ function appendPinGroups(
           state.collaborative,
           pin.id === state.selectedPinId,
           state.categoryColors,
+          state.numbers.get(pin.id),
+          state.canReorder && group.pins.length > 1,
         ),
       )
     }
     into.append(section)
   }
+}
+
+const gripPaths =
+  'M8 5.5h.01M12 5.5h.01M8 10h.01M12 10h.01M8 14.5h.01M12 14.5h.01'
+
+/**
+ * The grabber in a card's top right corner: drag it to move the card within its
+ * group, or press ArrowUp/ArrowDown on it. Pointer events rather than HTML drag
+ * and drop, which touch screens do not fire — and a Map Post is mostly read on
+ * one. The card is moved in the DOM as the pointer crosses its neighbours, and
+ * the new order is reported once, on release, so nothing is written mid-drag.
+ */
+function dragHandle(card: HTMLElement, title: string): HTMLElement {
+  const handle = document.createElement('div')
+  handle.className = 'pin-card-grip'
+  handle.setAttribute('role', 'button')
+  handle.tabIndex = 0
+  handle.setAttribute(
+    'aria-label',
+    `Reorder ${title}: drag, or use the up and down arrow keys`,
+  )
+  const svg = document.createElementNS(svgNs, 'svg')
+  svg.setAttribute('viewBox', '0 0 20 20')
+  svg.setAttribute('width', '20')
+  svg.setAttribute('height', '20')
+  svg.setAttribute('aria-hidden', 'true')
+  svg.setAttribute('focusable', 'false')
+  const dots = document.createElementNS(svgNs, 'path')
+  dots.setAttribute('d', gripPaths)
+  dots.setAttribute('stroke', 'currentColor')
+  dots.setAttribute('stroke-width', '2.5')
+  dots.setAttribute('stroke-linecap', 'round')
+  svg.append(dots)
+  handle.append(svg)
+
+  const cardsOf = (group: HTMLElement): HTMLElement[] => [
+    ...group.querySelectorAll<HTMLElement>(':scope > .pin-card'),
+  ]
+  const idsOf = (group: HTMLElement): string[] =>
+    cardsOf(group).map(c => c.dataset.pinId as string)
+
+  handle.addEventListener('click', ev => ev.stopPropagation())
+
+  handle.addEventListener('keydown', ev => {
+    if (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown') return
+    ev.preventDefault()
+    ev.stopPropagation()
+    const group = card.parentElement as HTMLElement
+    const ids = idsOf(group)
+    const from = ids.indexOf(card.dataset.pinId as string)
+    const to = from + (ev.key === 'ArrowUp' ? -1 : 1)
+    if (to < 0 || to >= ids.length) return
+    const moved = [...ids]
+    moved[from] = ids[to] as string
+    moved[to] = ids[from] as string
+    handlers.onReorderGroup(moved)
+  })
+
+  handle.addEventListener('pointerdown', down => {
+    if (down.button !== 0) return
+    down.preventDefault()
+    down.stopPropagation()
+    const group = card.parentElement as HTMLElement
+    const before = idsOf(group)
+    const box = card.getBoundingClientRect()
+    const grabOffset = down.clientY - box.top
+    let lastY = down.clientY
+
+    // The card lifts out of the list and follows the pointer; a dashed
+    // placeholder of the same height holds its place, and is what moves as the
+    // pointer crosses the other cards. Moving the card itself instead would
+    // detach the handle mid-drag, and a detached element stops hearing the
+    // pointer — so the listeners are on the document, not the handle.
+    const placeholder = document.createElement('div')
+    placeholder.className = 'pin-card-placeholder'
+    placeholder.style.height = `${box.height}px`
+    card.before(placeholder)
+    card.classList.add('dragging')
+    card.style.width = `${box.width}px`
+    card.style.left = `${box.left}px`
+    const follow = (): void => {
+      card.style.top = `${lastY - grabOffset}px`
+    }
+    follow()
+
+    const others = (): HTMLElement[] =>
+      cardsOf(group).filter(other => other !== card)
+
+    const place = (): void => {
+      const rest = others()
+      const next = rest.find(other => {
+        const otherBox = other.getBoundingClientRect()
+        return lastY < otherBox.top + otherBox.height / 2
+      })
+      // Only touch the DOM when the placeholder has actually changed places.
+      if (next) {
+        if (placeholder.nextElementSibling !== next) next.before(placeholder)
+      } else {
+        const last = rest[rest.length - 1]
+        if (last && last.nextElementSibling !== placeholder)
+          last.after(placeholder)
+      }
+    }
+
+    const move = (ev: PointerEvent): void => {
+      lastY = ev.clientY
+      follow()
+      // The list is longer than its window, so dragging to an edge scrolls it.
+      const root = sidebarEl.getBoundingClientRect()
+      const edge = 40
+      suppressTour()
+      if (lastY < root.top + edge) sidebarEl.scrollTop -= 12
+      else if (lastY > root.bottom - edge) sidebarEl.scrollTop += 12
+      place()
+    }
+    const end = (): void => {
+      document.removeEventListener('pointermove', move)
+      document.removeEventListener('pointerup', end)
+      document.removeEventListener('pointercancel', end)
+      // The order is where the placeholder ended up among the other cards.
+      const after: string[] = []
+      for (const child of group.children) {
+        if (child === placeholder) after.push(card.dataset.pinId as string)
+        else if (
+          child instanceof HTMLElement &&
+          child.classList.contains('pin-card') &&
+          child !== card
+        ) {
+          after.push(child.dataset.pinId as string)
+        }
+      }
+      placeholder.remove()
+      card.classList.remove('dragging')
+      card.style.width = ''
+      card.style.left = ''
+      card.style.top = ''
+      if (after.some((id, index) => id !== before[index])) {
+        handlers.onReorderGroup(after)
+      }
+    }
+    document.addEventListener('pointermove', move)
+    document.addEventListener('pointerup', end)
+    document.addEventListener('pointercancel', end)
+  })
+
+  return handle
 }
 
 /**
@@ -487,6 +671,8 @@ function pinCard(
   collaborative: boolean,
   selected: boolean,
   colors: Map<string, string>,
+  number: number | undefined,
+  reorderable: boolean,
 ): HTMLElement {
   // A card holds a link and (for Owners) an edit button, and a <button> may not
   // contain an <a> — hence a div carrying the button role by hand.
@@ -515,6 +701,14 @@ function pinCard(
 
   const titleRow = document.createElement('div')
   titleRow.className = 'pin-card-title-row'
+
+  if (number !== undefined) {
+    const badge = document.createElement('span')
+    badge.className = 'pin-card-number'
+    badge.textContent = `${number}`
+    badge.setAttribute('aria-label', `Number ${number}`)
+    titleRow.append(badge)
+  }
 
   const title = document.createElement('h3')
   title.className = 'pin-card-title'
@@ -574,19 +768,26 @@ function pinCard(
 
   card.append(body)
 
+  if (reorderable) {
+    card.classList.add('reorderable')
+    card.append(dragHandle(card, pin.title))
+  }
+
   if (capability.canEdit) {
     const actions = document.createElement('div')
     actions.className = 'pin-card-actions'
-    const edit = document.createElement('button')
-    edit.className = 'pin-card-edit'
-    edit.type = 'button'
-    edit.textContent = 'Edit'
-    edit.setAttribute('aria-label', `Edit ${pin.title}`)
-    edit.addEventListener('click', ev => {
-      ev.stopPropagation()
-      handlers.onEditPin(pin.id)
-    })
-    actions.append(edit)
+    {
+      const edit = document.createElement('button')
+      edit.className = 'pin-card-edit'
+      edit.type = 'button'
+      edit.textContent = 'Edit'
+      edit.setAttribute('aria-label', `Edit ${pin.title}`)
+      edit.addEventListener('click', ev => {
+        ev.stopPropagation()
+        handlers.onEditPin(pin.id)
+      })
+      actions.append(edit)
+    }
     card.append(actions)
   }
 

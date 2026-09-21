@@ -201,6 +201,12 @@ export type GetMapRsp = {
    * Preview included, since a Preview draws them. See ADR-0021.
    */
   regions: Region[]
+  /**
+   * Pin ids in the Map's hand-made order — always present, `[]` where nobody has
+   * reordered anything. It may name Pins that no longer exist; `sortPins` ignores
+   * them.
+   */
+  order: string[]
 }
 
 /**
@@ -243,6 +249,8 @@ export type ImportMapReq = {
   pins: PinExport[]
   regions?: RegionExport[]
   summary?: string
+  /** The file's Pins are in the Map's hand-made order: see `MapFile.ordered`. */
+  ordered?: true
 }
 
 /**
@@ -259,6 +267,8 @@ export type ImportMapRsp = {
   regions: Region[]
   summary?: string
   replaced: {summary: boolean; regions: number}
+  /** The Map's Pin order now that the imported Pins are in it. */
+  order: string[]
 }
 
 /**
@@ -308,6 +318,16 @@ export type SetSummaryReq = {summary: string}
  * instead of what was typed, the way an Add or Update answers with the Pin.
  */
 export type SetSummaryRsp = {summary?: string}
+
+/**
+ * Writes the Map's Pin order: every Pin id, in the order the Sidebar should list
+ * them within their groups. It names no Map, for the reason every Pin route does
+ * not. Owner, or a Moderator on a Collaborative Map: see `canEditMap`.
+ */
+export type SetOrderReq = {order: string[]}
+
+/** What is now stored — ids of Pins that no longer exist are left out. */
+export type SetOrderRsp = {order: string[]}
 
 /** One Map Post's row in an Index Post's Listing. */
 export type IndexEntry = {
@@ -614,6 +634,8 @@ export const Endpoint = {
   ClearDefaultArea: 'api/area/clear',
   /** Write this Map's Summary. Owner, or a Moderator on a Collaborative Map. */
   SetSummary: 'api/summary/set',
+  /** Write this Map's Pin order. Owner, or a Moderator on a Collaborative Map. */
+  SetOrder: 'api/order/set',
   /** Trace a Region. Owner, or a Moderator on a Collaborative Map. */
   AddRegion: 'api/region/add',
   UpdateRegion: 'api/region/update',
@@ -644,6 +666,7 @@ export const EndpointMethod = {
   [Endpoint.SetDefaultArea]: 'POST',
   [Endpoint.ClearDefaultArea]: 'POST',
   [Endpoint.SetSummary]: 'POST',
+  [Endpoint.SetOrder]: 'POST',
   [Endpoint.AddRegion]: 'POST',
   [Endpoint.UpdateRegion]: 'POST',
   [Endpoint.DeleteRegion]: 'POST',

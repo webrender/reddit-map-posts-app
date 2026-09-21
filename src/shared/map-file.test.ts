@@ -367,3 +367,24 @@ test('refuses a Summary over its ceiling', () => {
   const text = JSON.stringify({summary: 'x'.repeat(4001), pins: []})
   assert.match(error(text), /longer than 4000/)
 })
+
+test('formatMapFile: a Map with an order writes its pins in it and says so', () => {
+  const pins: Pin[] = ['a', 'b'].map(id => ({
+    id,
+    title: id,
+    location: {lat: 0, lng: 0},
+  }))
+  const file = JSON.parse(formatMapFile(pins, [], undefined, ['b', 'a']))
+  assert.equal(file.ordered, true)
+  assert.deepEqual(
+    file.pins.map((p: {title: string}) => p.title),
+    ['b', 'a'],
+  )
+  const read = parseMapFile(formatMapFile(pins, [], undefined, ['b', 'a']))
+  assert.ok(!('error' in read) && read.ordered)
+})
+
+test('formatMapFile: a Map with no order is not marked ordered', () => {
+  const pins: Pin[] = [{id: 'a', title: 'A', location: {lat: 0, lng: 0}}]
+  assert.equal('ordered' in JSON.parse(formatMapFile(pins)), false)
+})

@@ -52,6 +52,7 @@ export const elsewhereName = 'Elsewhere'
 export function planPrint(file: {
   pins: readonly PinExport[]
   regions?: readonly RegionExport[]
+  ordered?: boolean
 }): Plan {
   const pins: Pin[] = file.pins.map((pin, index) => ({
     ...pin,
@@ -64,10 +65,15 @@ export function planPrint(file: {
     createdAt: index + 1,
   }))
 
+  // An Export from a Map that was reordered lists its Pins in that order, so the
+  // ids handed out above, which follow the list, are the order. Any other file's
+  // list order means nothing and the Pins sort by title, as they always did.
+  const order = file.ordered ? pins.map(pin => pin.id) : []
+
   const sections = groupPinsByRegion(pins, regions).map(group => {
     const groups: NumberedGroup[] = []
     const numbered: NumberedPin[] = []
-    const categoryGroups = groupPinsByCategory(group.pins)
+    const categoryGroups = groupPinsByCategory(group.pins, order)
     for (const categoryGroup of categoryGroups) {
       const groupPins = categoryGroup.pins.map(pin => {
         const entry = {number: numbered.length + 1, pin}

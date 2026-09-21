@@ -43,6 +43,7 @@ import {
   canEditPin,
   type MapAccess,
 } from '../shared/permissions.ts'
+import {reorderGroup} from '../shared/pin-order.ts'
 import {
   categoryColors,
   pinColor,
@@ -59,6 +60,7 @@ import {
   fetchGetMap,
   fetchImportMap,
   fetchSetDefaultArea,
+  fetchSetOrder,
   fetchSetSummary,
   fetchUpdatePin,
   fetchUpdatePinResult,
@@ -81,6 +83,7 @@ import {
   initSidebar,
   isNarrowViewport,
   isSidebarOpen,
+  numberPins,
   type PinCapability,
   renderSidebar,
   resolveSelection,
@@ -399,6 +402,10 @@ let access: MapAccess = {
 /** The Owner's username — the byline a legacy Pin with no `author` of its own falls back to. */
 let ownerName = ''
 let pins: Pin[] = []
+/** The Map's hand-made Pin order, which decides the Sidebar's order and so the numbers. */
+let pinOrder: string[] = []
+/** Pin id to its number; empty in a Preview, whose markers carry none. */
+let pinNumbers = new Map<string, number>()
 /**
  * The Map's own account of itself, absent where none has been written. Held
  * here rather than read back off the DOM so that what is shown and what would
@@ -542,6 +549,7 @@ async function init(): Promise<void> {
   }
   ownerName = data.ownerName
   pins = data.pins
+  pinOrder = data.order
   summary = data.summary
   defaultArea = data.defaultArea
   setRegions(data.regions)
@@ -582,6 +590,7 @@ async function init(): Promise<void> {
       const pin = pins.find(candidate => candidate.id === pinId)
       if (pin) openEditDialog(pin)
     },
+    onReorderGroup: groupIds => void reorderPinsInList(groupIds),
     onOpenLink: url => navigateTo(url),
     onToggle: () => map.resize(),
     onSelectRegion: regionId => selectRegion(regionId),
@@ -1095,13 +1104,22 @@ function render(): void {
   }
 
   const visible = filterPins(pins, activeCategory)
+  const shown = new Set(visible.map(pin => pin.id))
+  const regionGroups = regions.length
+    ? membership
+        .map(group => ({
+          region: group.region,
+          pins: group.pins.filter(pin => shown.has(pin.id)),
+        }))
+        .filter(group => group.region || group.pins.length)
+    : undefined
+  pinNumbers = numberPins(visible, regionGroups, pinOrder)
   const onMap = mapVisiblePins()
   const previouslySelected = selectedPinId
   // Resolved against what the Map shows, so that when the tour narrows the Map
   // a Selected Pin it no longer holds is let go of in both views at once.
   selectedPinId = resolveSelection(selectedPinId, onMap)
   renderMarkers(onMap)
-  const shown = new Set(visible.map(pin => pin.id))
   renderSidebar({
     pins: visible,
     selectedPinId,
@@ -1112,21 +1130,37 @@ function render(): void {
     // The one place `canEditPin` runs on the client: `sidebar.ts` stays pure
     // display, taking the answer rather than the ingredients that produce it.
     pinCapabilities: new Map(visible.map(pin => [pin.id, pinCapability(pin)])),
-    regionGroups: regions.length
-      ? membership
-          .map(group => ({
-            region: group.region,
-            pins: group.pins.filter(pin => shown.has(pin.id)),
-          }))
-          .filter(group => group.region || group.pins.length)
-      : undefined,
+    regionGroups,
     regionColors: regionColorByName,
+    order: pinOrder,
+    numbers: pinNumbers,
+    canReorder: canEditMap(access),
     activeRegionId,
   })
   showFilterSwatch()
   // Losing the Selected Pin to a filter or a deletion lands in the same place
   // as letting go of it deliberately: the whole Map.
   if (previouslySelected && !selectedPinId) fitToPins(true)
+}
+
+/**
+ * Applies a group's new order, which the Sidebar has already shown by moving the
+ * card, and writes it. Put back if the write fails, the way {@link movePin}
+ * treats a drag: the list never stays showing an order the server did not
+ * accept.
+ */
+async function reorderPinsInList(groupIds: string[]): Promise<void> {
+  const previous = pinOrder
+  pinOrder = reorderGroup(pins, pinOrder, groupIds)
+  render()
+  const rsp = await fetchSetOrder({order: pinOrder})
+  if (rsp) {
+    pinOrder = rsp.order
+    return
+  }
+  pinOrder = previous
+  render()
+  flashStatus('Could not reorder pins.')
 }
 
 /**
@@ -1292,6 +1326,17 @@ function createMarker(pin: Pin): Marker {
   label.className = selected ? 'pin-label selected' : 'pin-label'
   label.textContent = pin.title
   element.appendChild(label)
+
+  // Its place in the Sidebar, over the head of the marker. Absent in a Preview,
+  // which has no list for a number to point into.
+  const number = pinNumbers.get(pin.id)
+  if (number !== undefined) {
+    const badge = document.createElement('span')
+    badge.className = 'pin-number'
+    badge.textContent = `${number}`
+    element.appendChild(badge)
+    element.classList.add('numbered')
+  }
 
   // A Preview's markers have nothing to click and nothing to drag.
   if (isPreview) return marker
@@ -1872,6 +1917,7 @@ async function refreshForExport(): Promise<void> {
   const data = await fetchGetMap(false)
   if (!data) return
   pins = data.pins
+  pinOrder = data.order
   summary = data.summary
   setRegions(data.regions)
   renderCategoryOptions()
@@ -1883,7 +1929,7 @@ async function refreshForExport(): Promise<void> {
 async function openPinsIo(): Promise<void> {
   stopDroppingPin()
   await refreshForExport()
-  pinsIoExportText.value = formatMapFile(pins, regions, summary)
+  pinsIoExportText.value = formatMapFile(pins, regions, summary, pinOrder)
   pinsIoImportText.value = ''
   setPinsIoNote('')
   pinsIoDialog.showModal()
@@ -1955,6 +2001,7 @@ async function importMap(): Promise<void> {
   pinsIoAddBtn.disabled = true
   setPinsIoNote(`Importing ${countLabel(read.pins.length)}…`)
   const req: ImportMapReq = {pins: read.pins}
+  if (read.ordered) req.ordered = true
   if (read.regions !== undefined) req.regions = read.regions
   if (read.summary !== undefined) req.summary = read.summary
   const rsp = await fetchImportMap(req)
@@ -1966,6 +2013,7 @@ async function importMap(): Promise<void> {
 
   // Paints what landed rather than what was sent.
   pins = [...pins, ...rsp.pins]
+  pinOrder = rsp.order
   summary = rsp.summary
   setRegions(rsp.regions)
   renderSummary()
@@ -2033,7 +2081,7 @@ async function openPrint(): Promise<void> {
   stopDroppingPin()
   await refreshForExport()
   const empty = !pins.length && !regions.length
-  printExportText.value = formatMapFile(pins, regions, summary)
+  printExportText.value = formatMapFile(pins, regions, summary, pinOrder)
   printCopyBtn.disabled = empty
   printOpenBtn.disabled = empty
   setPrintNote(empty ? 'This map has nothing to print yet.' : '')

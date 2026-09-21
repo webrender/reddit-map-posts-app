@@ -25,6 +25,11 @@ export type MapData = {
   pins: Pin[]
   /** The Map's Regions, in no particular order; `[]` where it has none. */
   regions: Region[]
+  /**
+   * Pin ids in the hand-made order — see `sortPins` in `pin-order.ts`. `[]` where nobody has
+   * reordered anything, and it may name Pins that no longer exist.
+   */
+  order: string[]
 }
 
 /**
@@ -33,7 +38,7 @@ export type MapData = {
  * other the way a single read-modify-write of one JSON blob would.
  */
 export async function dbGetMap(t3: T3): Promise<MapData | undefined> {
-  const [ownerId, kind, summary, metaJson, pinsHash, regionsHash] =
+  const [ownerId, kind, summary, metaJson, pinsHash, regionsHash, orderJson] =
     await Promise.all([
       redis.get(ownerKey(t3)),
       redis.get(kindKey(t3)),
@@ -41,6 +46,7 @@ export async function dbGetMap(t3: T3): Promise<MapData | undefined> {
       redis.hGet(INDEX_META_KEY, t3),
       redis.hGetAll(pinsKey(t3)),
       redis.hGetAll(regionsKey(t3)),
+      redis.get(orderKey(t3)),
     ])
   if (!ownerId) return undefined
   const pins = Object.values(pinsHash).map(json => JSON.parse(json) as Pin)
@@ -54,6 +60,7 @@ export async function dbGetMap(t3: T3): Promise<MapData | undefined> {
     collaborative: kind === MapKind.Collaborative,
     pins,
     regions,
+    order: orderJson ? (JSON.parse(orderJson) as string[]) : [],
   }
   // Absent rather than empty: a Map with no Summary and a Map whose Summary is
   // a blank string are the same Map, and only one of them is a fact.
@@ -88,6 +95,16 @@ export async function dbGetMapMeta(
 export async function dbSetSummary(t3: T3, summary: string): Promise<void> {
   await requireOwnerExists(t3)
   await redis.set(summaryKey(t3), summary)
+}
+
+/**
+ * Writes the Map's Pin order: one value with no id to collide on, so a plain
+ * `set`, last write wins, for {@link dbSetSummary}'s reason.
+ */
+export async function dbSetOrder(t3: T3, order: string[]): Promise<void> {
+  await requireOwnerExists(t3)
+  if (order.length) await redis.set(orderKey(t3), JSON.stringify(order))
+  else await redis.del(orderKey(t3))
 }
 
 /** Forgets it, putting the Map back to having nothing to say about itself. */
@@ -173,7 +190,14 @@ export async function dbCreateMap(
       [t3]: JSON.stringify({...meta, collaborative}),
     })
   })
-  return {ownerId, ownerName: meta.author, collaborative, pins: [], regions: []}
+  return {
+    ownerId,
+    ownerName: meta.author,
+    collaborative,
+    pins: [],
+    regions: [],
+    order: [],
+  }
 }
 
 /**
@@ -390,6 +414,7 @@ export async function dbDeleteMap(t3: T3): Promise<void> {
     redis.del(kindKey(t3)),
     redis.del(summaryKey(t3)),
     redis.del(regionsKey(t3)),
+    redis.del(orderKey(t3)),
   ])
 }
 
@@ -497,6 +522,15 @@ function summaryKey(t3: T3): string {
  */
 function regionsKey(t3: T3): string {
   return `regions:${t3}`
+}
+
+/**
+ * Holds the Map's Pin order as a JSON array of ids, absent where nobody has
+ * reordered. Its own key for {@link kindKey}'s reason. `dbDeleteMap` must delete
+ * it.
+ */
+function orderKey(t3: T3): string {
+  return `order:${t3}`
 }
 
 async function requireOwnerExists(t3: T3): Promise<void> {

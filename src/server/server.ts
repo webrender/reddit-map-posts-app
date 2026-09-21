@@ -54,6 +54,8 @@ import {
   type Region,
   type SetDefaultAreaReq,
   type SetDefaultAreaRsp,
+  type SetOrderReq,
+  type SetOrderRsp,
   type SetSummaryReq,
   type SetSummaryRsp,
   type UpdatePinReq,
@@ -80,6 +82,7 @@ import {
   canEditPin,
   type MapAccess,
 } from '../shared/permissions.ts'
+import {PinOrderMaxCount, sortPins} from '../shared/pin-order.ts'
 import {
   dbAddPin,
   dbAddPins,
@@ -103,6 +106,7 @@ import {
   dbReplaceRegions,
   dbSetCachedScores,
   dbSetDefaultArea,
+  dbSetOrder,
   dbSetScoreCursor,
   dbSetSummary,
   dbUnlistMap,
@@ -239,6 +243,9 @@ async function route(
       case Endpoint.SetSummary:
         rsp = await routeSetSummary(reqMsg)
         break
+      case Endpoint.SetOrder:
+        rsp = await routeSetOrder(reqMsg)
+        break
       case Endpoint.GetIndex:
         rsp = await routeGetIndex(url.searchParams)
         break
@@ -300,6 +307,7 @@ async function routeGetMap(searchParams: URLSearchParams): Promise<GetMapRsp> {
     collaborative: map.collaborative,
     isModerator: moderator,
     regions: map.regions,
+    order: map.order,
   }
   if (defaultArea) rsp.defaultArea = defaultArea
   if (map.summary) rsp.summary = map.summary
@@ -428,7 +436,19 @@ async function routeImportMap(reqMsg: IncomingMessage): Promise<ImportMapRsp> {
   const summary =
     read.summary === undefined ? undefined : normalizeSummary(read.summary)
 
+  // A file in the Map's hand-made order asks for it to be kept: the Pins already
+  // here keep their places, and the new ones follow in the file's order. A file
+  // that is not ordered leaves the order alone, so the new Pins simply sort by
+  // title after everything already ranked.
+  const order = read.ordered
+    ? [
+        ...sortPins(map.pins, map.order).map(pin => pin.id),
+        ...pins.map(pin => pin.id),
+      ]
+    : map.order
+
   await dbAddPins(t3, pins)
+  if (read.ordered) await dbSetOrder(t3, order)
   if (regions) await dbReplaceRegions(t3, regions)
   if (summary === '') await dbClearSummary(t3)
   else if (summary !== undefined) await dbSetSummary(t3, summary)
@@ -441,6 +461,7 @@ async function routeImportMap(reqMsg: IncomingMessage): Promise<ImportMapRsp> {
       summary: summary !== undefined && !!map.summary,
       regions: regions ? map.regions.length : 0,
     },
+    order,
   }
   const landed = summary === undefined ? map.summary : summary
   if (landed) rsp.summary = landed
@@ -550,6 +571,36 @@ async function routeSetSummary(
   }
   await dbSetSummary(t3, summary)
   return {summary}
+}
+
+/**
+ * Writes the Map's Pin order, for whoever `canEditMap` allows — the Owner, or a
+ * Moderator on a Collaborative Map — since the order is how the Map lists what
+ * is on it rather than anything a Contributor put there. Authorized before the
+ * body is read, for {@link routeSetSummary}'s reason.
+ *
+ * The ids are checked against the Pins the Map holds: unknown ones and repeats
+ * are dropped, so what is stored can never name a Pin that is not there, and a
+ * Pin someone added while this was in flight is simply unranked and sorts last.
+ */
+async function routeSetOrder(reqMsg: IncomingMessage): Promise<SetOrderRsp> {
+  const t3 = requirePostId()
+  await requireCanEditMap(t3)
+
+  const req = await readJson<SetOrderReq>(reqMsg)
+  if (
+    !Array.isArray(req.order) ||
+    req.order.length > PinOrderMaxCount ||
+    req.order.some(id => typeof id !== 'string')
+  ) {
+    throw new HttpError(400, 'order must be a list of pin ids')
+  }
+  const map = await dbGetMap(t3)
+  if (!map) throw new HttpError(404, 'map not found')
+  const known = new Set(map.pins.map(pin => pin.id))
+  const order = [...new Set(req.order)].filter(id => known.has(id))
+  await dbSetOrder(t3, order)
+  return {order}
 }
 
 /**

@@ -37,6 +37,8 @@ import {
   PostTitleMaxLen,
   type Region,
   type SetDefaultAreaReq,
+  type SetOrderReq,
+  type SetOrderRsp,
   type SetSummaryReq,
   type SetSummaryRsp,
   type UpdatePinReq,
@@ -680,6 +682,7 @@ test('get map: owner viewing their own map', async () => {
     collaborative: false,
     isModerator: false,
     regions: [],
+    order: [],
   })
 })
 
@@ -1005,6 +1008,100 @@ test('delete pin: two deletes of the same pin leave the cached count down by exa
   assert.equal(first.status, 200)
   assert.equal(second.status, 200)
   assert.equal(storedPinCount(), 0)
+})
+
+function setOrder(order: string[]): Promise<Response> {
+  return postJson(Endpoint.SetOrder, {order} satisfies SetOrderReq)
+}
+
+const ORDER_PINS: Pin[] = ['a', 'b', 'c'].map(id => ({
+  id,
+  location: {lat: 1, lng: 2},
+  title: id.toUpperCase(),
+}))
+
+test('set order: the owner writes one, and the map hands it back', async () => {
+  seedMap({ownerId: OWNER, pins: ORDER_PINS})
+
+  const rsp = await setOrder(['c', 'a', 'b'])
+  assert.equal(rsp.status, 200)
+  assert.deepEqual<SetOrderRsp>(await rsp.json(), {order: ['c', 'a', 'b']})
+
+  const map = (await (
+    await fetch(`${serverURL}/${Endpoint.GetMap}`)
+  ).json()) as GetMapRsp
+  assert.deepEqual(map.order, ['c', 'a', 'b'])
+})
+
+test('set order: unknown ids and repeats are dropped', async () => {
+  seedMap({ownerId: OWNER, pins: ORDER_PINS})
+
+  const rsp = await setOrder(['b', 'ghost', 'b', 'a'])
+  assert.deepEqual<SetOrderRsp>(await rsp.json(), {order: ['b', 'a']})
+})
+
+test('set order: something that is not a list of ids is refused', async () => {
+  seedMap({ownerId: OWNER, pins: ORDER_PINS})
+
+  const rsp = await postJson(Endpoint.SetOrder, {order: [1, 2]})
+  assert.equal(rsp.status, 400)
+})
+
+test('set order: a viewer is forbidden', async () => {
+  seedMap({ownerId: OWNER, pins: ORDER_PINS})
+  requestUserId = 't2_viewer' as T2
+
+  assert.equal((await setOrder(['b', 'a'])).status, 403)
+})
+
+test('set order: a moderator is forbidden on a Solo Map and allowed on a Collaborative one', async () => {
+  seedMap({ownerId: OWNER, pins: ORDER_PINS})
+  requestUserId = MODERATOR
+  seedModerator(MODERATOR)
+  assert.equal((await setOrder(['b', 'a'])).status, 403)
+
+  seedCollabMap({ownerId: OWNER, pins: ORDER_PINS})
+  assert.equal((await setOrder(['b', 'a'])).status, 200)
+})
+
+test('set order: a contributor is forbidden on a Collaborative Map', async () => {
+  seedCollabMap({ownerId: OWNER, pins: ORDER_PINS})
+  requestUserId = CONTRIBUTOR
+
+  assert.equal((await setOrder(['b', 'a'])).status, 403)
+})
+
+test('import: an ordered file keeps the existing order and appends its pins', async () => {
+  seedMap({ownerId: OWNER, pins: ORDER_PINS})
+  await setOrder(['c', 'a', 'b'])
+
+  const req: ImportMapReq = {
+    ordered: true,
+    pins: [
+      {title: 'Zed', location: {lat: 3, lng: 4}},
+      {title: 'Ann', location: {lat: 5, lng: 6}},
+    ],
+  }
+  const body = (await (
+    await postJson(Endpoint.ImportMap, req)
+  ).json()) as ImportMapRsp
+  assert.deepEqual(body.order.slice(0, 3), ['c', 'a', 'b'])
+  assert.deepEqual(
+    body.order.slice(3),
+    body.pins.map(pin => pin.id),
+  )
+  assert.equal(body.pins[0]?.title, 'Zed')
+})
+
+test('import: an unordered file leaves the order alone', async () => {
+  seedMap({ownerId: OWNER, pins: ORDER_PINS})
+  await setOrder(['c', 'a'])
+
+  const req: ImportMapReq = {pins: [{title: 'Zed', location: {lat: 3, lng: 4}}]}
+  const body = (await (
+    await postJson(Endpoint.ImportMap, req)
+  ).json()) as ImportMapRsp
+  assert.deepEqual(body.order, ['c', 'a'])
 })
 
 test('import pins: owner adds a whole export at once', async () => {
