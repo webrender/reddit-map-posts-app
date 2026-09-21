@@ -26,6 +26,7 @@ import {
   type LatLng,
   type MapBounds,
   type Pin,
+  PrintPageUrl,
   type Region,
   type UpdatePinReq,
 } from '../shared/api.ts'
@@ -177,6 +178,18 @@ const pinsIoCloseBtn = document.getElementById(
 const pinsIoNote = document.getElementById(
   'pins-io-note',
 ) as HTMLParagraphElement
+
+const printBtn = document.getElementById('print-btn') as HTMLButtonElement
+const printDialog = document.getElementById('print-dialog') as HTMLDialogElement
+const printExportText = document.getElementById(
+  'print-export-text',
+) as HTMLTextAreaElement
+const printCopyBtn = document.getElementById('print-copy') as HTMLButtonElement
+const printOpenBtn = document.getElementById('print-open') as HTMLButtonElement
+const printCloseBtn = document.getElementById(
+  'print-close',
+) as HTMLButtonElement
+const printNote = document.getElementById('print-note') as HTMLParagraphElement
 
 const regionsBtn = document.getElementById('regions-btn') as HTMLButtonElement
 const toolbarRegion = document.getElementById(
@@ -509,6 +522,7 @@ async function init(): Promise<void> {
   deletePostBtn.hidden = true
   areaBtn.hidden = true
   pinsIoBtn.hidden = true
+  printBtn.hidden = true
   regionsBtn.hidden = true
 
   const data = await fetchGetMap(!isPreview)
@@ -538,6 +552,8 @@ async function init(): Promise<void> {
   // The Preview has no toolbar to hold either of them.
   deletePostBtn.hidden = isPreview || !ownsMap()
   pinsIoBtn.hidden = isPreview || !ownsMap()
+  // Read-only, so every reader gets it, unlike Import and Export above.
+  printBtn.hidden = isPreview
   // Regions are the Map speaking about itself, like the Summary, so this is not
   // the Owner's alone: see `canEditMap`.
   regionsBtn.hidden = isPreview || !canEditMap(access)
@@ -1843,25 +1859,30 @@ function closeLinkHelp(): void {
  * live while one is armed and would take a paste meant for the Import field,
  * feeding an Export to `parseMapLink` and refusing it as an unreadable Map Link.
  */
+/**
+ * A Collaborative Map's Owner is not necessarily looking at every Pin another
+ * Contributor has added since the page loaded, so anything that writes the
+ * whole Map out as text refetches first. No `full` reading: this only needs the
+ * Pins, not a second moderator round trip. The Regions and the Summary are as
+ * stale as the Pins are — a Moderator may have changed either since this page
+ * loaded, and an Export is the whole Map.
+ */
+async function refreshForExport(): Promise<void> {
+  if (!access.collaborative) return
+  const data = await fetchGetMap(false)
+  if (!data) return
+  pins = data.pins
+  summary = data.summary
+  setRegions(data.regions)
+  renderCategoryOptions()
+  renderSummary()
+  render()
+  renderRegions()
+}
+
 async function openPinsIo(): Promise<void> {
   stopDroppingPin()
-  if (access.collaborative) {
-    // No `full` reading: this only needs the Pins, not a second moderator
-    // round trip.
-    const data = await fetchGetMap(false)
-    if (data) {
-      // The Regions and the Summary are as stale as the Pins are: a Moderator
-      // may have changed either since this page loaded, and an Export is now
-      // the whole Map.
-      pins = data.pins
-      summary = data.summary
-      setRegions(data.regions)
-      renderCategoryOptions()
-      renderSummary()
-      render()
-      renderRegions()
-    }
-  }
+  await refreshForExport()
   pinsIoExportText.value = formatMapFile(pins, regions, summary)
   pinsIoImportText.value = ''
   setPinsIoNote('')
@@ -1876,20 +1897,27 @@ async function openPinsIo(): Promise<void> {
  * themselves.
  */
 async function copyExport(): Promise<void> {
-  pinsIoExportText.focus()
-  pinsIoExportText.select()
+  await copyField(pinsIoExportText, setPinsIoNote)
+}
+
+async function copyField(
+  field: HTMLTextAreaElement,
+  setNote: (text: string, isError?: boolean) => void,
+): Promise<void> {
+  field.focus()
+  field.select()
   try {
-    await navigator.clipboard.writeText(pinsIoExportText.value)
-    setPinsIoNote(`Copied ${countLabel(pins.length)}.`)
+    await navigator.clipboard.writeText(field.value)
+    setNote(`Copied ${countLabel(pins.length)}.`)
     return
   } catch {
     // Falls through to the older gesture, which some sandboxes still allow.
   }
   if (document.execCommand('copy')) {
-    setPinsIoNote(`Copied ${countLabel(pins.length)}.`)
+    setNote(`Copied ${countLabel(pins.length)}.`)
     return
   }
-  setPinsIoNote(
+  setNote(
     'Could not copy for you — the text is selected, so press ⌘C or Ctrl+C.',
     true,
   )
@@ -1991,6 +2019,28 @@ function setPinsIoNote(text: string, isError: boolean = false): void {
   pinsIoNote.classList.toggle('error', isError && !!text)
 }
 
+function setPrintNote(text: string, isError: boolean = false): void {
+  printNote.textContent = text
+  printNote.classList.toggle('error', isError && !!text)
+}
+
+/**
+ * Shows the Map as an Export, ready to be carried to the print page. A Map Post
+ * cannot print itself — ADR-0023 — so this is the whole of the feature from in
+ * here: the text, and a way to the page that reads it.
+ */
+async function openPrint(): Promise<void> {
+  stopDroppingPin()
+  await refreshForExport()
+  const empty = !pins.length && !regions.length
+  printExportText.value = formatMapFile(pins, regions, summary)
+  printCopyBtn.disabled = empty
+  printOpenBtn.disabled = empty
+  setPrintNote(empty ? 'This map has nothing to print yet.' : '')
+  printDialog.showModal()
+  printExportText.scrollTop = 0
+}
+
 function readImageAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -2066,6 +2116,18 @@ async function confirmDeletePost(): Promise<void> {
 
 function wireEvents(): void {
   wireDeletePost()
+
+  // Read-only, so unlike Import and Export it is wired for every reader, above
+  // the Pin gates.
+  printBtn.addEventListener('click', () => void openPrint())
+  printCopyBtn.addEventListener(
+    'click',
+    () => void copyField(printExportText, setPrintNote),
+  )
+  // Reddit asks the reader to confirm before it leaves for an outside page.
+  printOpenBtn.addEventListener('click', () => navigateTo(PrintPageUrl))
+  printCloseBtn.addEventListener('click', () => printDialog.close())
+  printDialog.addEventListener('close', () => setPrintNote(''))
 
   // Wired above the Pin gates below, which it does not answer to: writing a
   // Summary is the Owner's or a Moderator's, and neither of those is what

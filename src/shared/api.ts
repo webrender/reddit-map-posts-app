@@ -592,6 +592,13 @@ export const PostTitleMaxLen = 300
  */
 export const MapSummaryMaxLen = 4000
 
+/**
+ * Where the standalone print page lives: `src/site/`, published to GitHub Pages
+ * by `.github/workflows/pages.yaml`. A Map Post cannot print itself, so the Map
+ * is copied out as an Export and pasted in there. See ADR-0023.
+ */
+export const PrintPageUrl = 'https://webrender.github.io/reddit-map-posts-app/'
+
 export type Endpoint = (typeof Endpoint)[keyof typeof Endpoint]
 export const Endpoint = {
   /** `?full=1` from the reading that can use a moderator answer. */

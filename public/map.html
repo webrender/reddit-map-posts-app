@@ -166,6 +166,7 @@
     #area-btn,
     #regions-btn,
     #pins-io-btn,
+    #print-btn,
     #delete-post-btn,
     #filter-btn,
     #area-close,
@@ -179,6 +180,7 @@
     #area-btn svg,
     #regions-btn svg,
     #pins-io-btn svg,
+    #print-btn svg,
     #delete-post-btn svg,
     #filter-btn svg,
     #area-close svg,
@@ -752,6 +754,7 @@
     #pin-dialog-title,
     #link-help-title,
     #pins-io-title,
+    #print-title,
     #regions-title,
     #region-dialog-title,
     #summary-dialog-title {
@@ -989,20 +992,24 @@
                                            them side by side is what makes that obvious without saying it. Wider
                                            than the other two, since both fields hold JSON that has to be legible
                                            enough to check before it is copied or pasted. */
-    #pins-io-dialog {
+    #pins-io-dialog,
+    #print-dialog {
       max-width: 34rem;
     }
-    #pins-io-dialog h3 {
+    #pins-io-dialog h3,
+    #print-dialog h3 {
       margin: 0 0 0.25rem;
       font-size: 0.8125rem;
     }
-    #pins-io-dialog p {
+    #pins-io-dialog p,
+    #print-dialog p {
       margin: 0 0 0.4rem;
       font-size: 0.75rem;
       line-height: 1.45;
       color: var(--text-muted);
     }
-    #pins-io-dialog textarea {
+    #pins-io-dialog textarea,
+    #print-dialog textarea {
       display: block;
       width: 100%;
       padding: 0.5rem 0.75rem;
@@ -1026,7 +1033,8 @@
       border-top: 1px solid var(--border);
     }
     #pins-io-export-actions,
-    #pins-io-import-actions {
+    #pins-io-import-actions,
+    #print-actions {
       display: flex;
       align-items: center;
       gap: 0.5rem;
@@ -1034,11 +1042,15 @@
     }
     #pins-io-add {
       margin-left: auto;
+    }
+    #pins-io-add,
+    #print-open {
       border-color: var(--accent);
       background: var(--accent);
       color: var(--on-accent);
     }
-    #pins-io-add:hover {
+    #pins-io-add:hover,
+    #print-open:hover {
       border-color: var(--accent-hover);
       background: var(--accent-hover);
     }
@@ -1050,15 +1062,27 @@
     /* What the dialog has to say about the last thing tried in it — a copy that
                                            the sandbox refused, a count that landed, an entry that could not be
                                            read. It takes the width the buttons leave, and says nothing at rest. */
-    #pins-io-note {
+    #pins-io-note,
+    #print-note {
       flex: 1 1 auto;
       min-width: 0;
       margin: 0;
       font-size: 0.75rem;
       line-height: 1.35;
     }
-    #pins-io-note.error {
+    #pins-io-note.error,
+    #print-note.error {
       color: var(--danger);
+    }
+    /* Copy on the left; Close and the one accented action together on the
+       right, the accented one last. The note sits under the row with its height
+       held, so a message arriving does not move the dialog. */
+    #print-close {
+      margin-left: auto;
+    }
+    #print-dialog #print-note {
+      min-height: 1.35em;
+      margin: 0.5rem 0 0;
     }
     /* A Region's name on the Map, at the middle of its polygon. A DOM marker for
                            the reason a Pin's label is one: a symbol layer needs glyphs the style's
@@ -1239,6 +1263,24 @@
                    text travels, which is the whole of what this control is. -->
               <path
                 d="M6.5 12.5v-8M6.5 4.5 4 7M6.5 4.5 9 7M13.5 7.5v8M13.5 15.5 11 13M13.5 15.5 16 13"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.75"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
+          <button
+            id="print-btn"
+            type="button"
+            hidden
+            aria-label="Print this map"
+          >
+            <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+              <!-- A printer: paper in, a tray out. -->
+              <path
+                d="M6 7V3.5h8V7M6 14.5H3.75v-6.25h12.5v6.25H14M6 12h8v4.5H6V12Z"
                 fill="none"
                 stroke="currentColor"
                 stroke-width="1.75"
@@ -1468,6 +1510,26 @@
       <div id="pins-io-footer">
         <button id="pins-io-close" type="button">Close</button>
       </div>
+    </dialog>
+
+    <dialog id="print-dialog">
+      <h2 id="print-title">Print this map</h2>
+      <p>
+        Printing happens on a separate page. Copy this map as text, then open
+        the print page and paste it in.
+      </p>
+      <textarea
+        id="print-export-text"
+        rows="6"
+        readonly
+        aria-label="This map, as text"
+      ></textarea>
+      <div id="print-actions">
+        <button id="print-copy" type="button">Copy</button>
+        <button id="print-close" type="button">Close</button>
+        <button id="print-open" type="button">Open print page</button>
+      </div>
+      <p id="print-note" role="status"></p>
     </dialog>
 
     <dialog id="summary-dialog">
