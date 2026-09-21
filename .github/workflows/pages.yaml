@@ -1,0 +1,56 @@
+# Publishes the standalone print page (src/site) to GitHub Pages. Needs the
+# repository's Pages source set to "GitHub Actions" (Settings > Pages).
+name: Pages
+
+on:
+  push:
+    branches: ['main']
+    paths:
+      - 'src/site/**'
+      - 'src/client/**'
+      - 'src/shared/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/pages.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+      - name: Install Node.js
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version: 22.20.0
+      - name: Install Dependencies
+        run: npm install --no-fund
+      - name: Build
+        run: npm run build:site
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Upload
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

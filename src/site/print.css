@@ -1,0 +1,337 @@
+:root {
+  --page-w: 7.5in;
+  --page-h: 10in;
+  --ink: #1b1f23;
+  --muted: #5b6670;
+  --line: #d4d9de;
+  --accent: #0b5cad;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #e9ecef;
+  color: var(--ink);
+  font:
+    14px / 1.4 system-ui,
+    sans-serif;
+}
+
+#app-ui {
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 1.5rem 1rem;
+}
+
+#app-ui .app-title {
+  margin: 0 0 0.5rem;
+}
+
+#app-ui label {
+  display: block;
+  font-weight: 600;
+}
+
+#json {
+  width: 100%;
+  margin: 0.25rem 0 0.75rem;
+  font:
+    12px / 1.4 ui-monospace,
+    monospace;
+}
+
+#controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: end;
+}
+
+#controls button,
+#controls input,
+#controls select {
+  font: inherit;
+  padding: 0.35rem 0.6rem;
+}
+
+#status {
+  min-height: 1.4em;
+  color: var(--muted);
+}
+
+#status.error {
+  color: #b3261e;
+}
+
+/* On screen a unit is a sheet; in print the page's own margin does that job. */
+.unit {
+  position: relative;
+  width: calc(var(--page-w) + 1in);
+  margin: 0 auto 1rem;
+  padding: 0.5in;
+  background: #fff;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.25);
+}
+
+.map-frame {
+  position: relative;
+  width: var(--page-w);
+  height: calc(var(--page-h) - 2px);
+  overflow: hidden;
+  background: #dfe5ea;
+}
+
+.map-frame > img,
+.map-frame > .map-holder,
+.map-frame > .overlay {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.map-title {
+  position: absolute;
+  top: 0.15in;
+  left: 0.15in;
+  max-width: 70%;
+  padding: 0.08in 0.15in;
+  background: rgb(255 255 255 / 0.92);
+  border-radius: 4px;
+}
+
+.map-title h1,
+.map-title h2 {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.2;
+}
+
+.map-title p {
+  margin: 0.02in 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.attribution {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  padding: 1px 6px;
+  background: rgb(255 255 255 / 0.8);
+  color: #333;
+  font-size: 9px;
+}
+
+.pin-badge,
+.pin-dot,
+.region-label,
+.legend {
+  position: absolute;
+}
+
+.pin-badge {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  color: #fff;
+  font:
+    700 12px / 1 system-ui,
+    sans-serif;
+  text-shadow: 0 0 2px rgb(0 0 0 / 0.6);
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.35);
+  transform: translate(-50%, -50%);
+}
+
+.pin-dot {
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.35);
+  transform: translate(-50%, -50%);
+}
+
+/* Squared off where a Category's swatch is round: see ADR-0021. */
+.region-label {
+  padding: 1px 7px;
+  border: 2px solid;
+  border-radius: 3px;
+  background: rgb(255 255 255 / 0.9);
+  font-weight: 700;
+  font-size: 13px;
+  white-space: nowrap;
+  transform: translate(-50%, -50%);
+}
+
+.legend {
+  left: 0.15in;
+  bottom: 0.25in;
+  max-width: 45%;
+  padding: 0.06in 0.12in;
+  background: rgb(255 255 255 / 0.92);
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.legend div {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.swatch {
+  display: inline-block;
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.swatch.region {
+  border-radius: 2px;
+}
+
+.section-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 0.15in;
+  padding-bottom: 0.05in;
+  border-bottom: 2px solid var(--ink);
+  font-size: 22px;
+}
+
+.section-heading .count {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.columns {
+  column-count: 3;
+  column-gap: 0.3in;
+}
+
+.pin-group-heading {
+  margin: 0.1in 0 0.06in;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  break-after: avoid;
+}
+
+.pin-group:first-child > .pin-group-heading {
+  margin-top: 0;
+}
+
+.card {
+  margin: 0 0 0.12in;
+  break-inside: avoid;
+}
+
+.card-image {
+  display: block;
+  width: 100%;
+  max-height: 1.6in;
+  margin-bottom: 4px;
+  object-fit: cover;
+  border-radius: 3px;
+}
+
+.card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.card-head .num {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  border-radius: 50%;
+  color: #fff;
+  font:
+    700 11px / 1 system-ui,
+    sans-serif;
+  text-shadow: 0 0 2px rgb(0 0 0 / 0.6);
+}
+
+.card h3 {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.25;
+}
+
+.card-link {
+  margin: 1px 0 0 26px;
+  color: var(--accent);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.card .markdown {
+  margin: 3px 0 0 26px;
+  font-size: 12px;
+}
+
+.markdown p,
+.markdown ul,
+.markdown ol {
+  margin: 0 0 0.4em;
+}
+
+.markdown ul,
+.markdown ol {
+  padding-left: 1.2em;
+}
+
+.empty {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.summary .markdown {
+  column-count: 3;
+  column-gap: 0.3in;
+  font-size: 13px;
+}
+
+@media print {
+  body {
+    background: #fff;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  #app-ui {
+    display: none;
+  }
+
+  .unit {
+    width: auto;
+    margin: 0;
+    padding: 0;
+    background: none;
+    box-shadow: none;
+  }
+
+  .unit + .unit {
+    break-before: page;
+  }
+}

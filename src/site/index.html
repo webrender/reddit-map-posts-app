@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Map Posts print view</title>
+    <link rel="stylesheet" href="print.css">
+  </head>
+  <body>
+    <div id="app-ui">
+      <h1 class="app-title">Print a Map</h1>
+      <p>
+        Export a Map from its Map Post, paste the JSON below, and print the
+        result: a full-page map for each Region, each followed by its places in
+        three columns. Nothing you paste leaves this page.
+      </p>
+      <label for="json">Export JSON</label>
+      <textarea id="json" rows="8" spellcheck="false"></textarea>
+      <div id="controls">
+        <label>
+          Title
+          <input id="title" type="text" value="My map">
+        </label>
+        <label>
+          Paper
+          <select id="paper">
+            <option value="letter">Letter</option>
+            <option value="a4">A4</option>
+          </select>
+        </label>
+        <button id="render-btn" type="button">Render</button>
+        <button id="print-btn" type="button" disabled>Print</button>
+      </div>
+      <p id="status" role="status"></p>
+    </div>
+    <main id="pages"></main>
+    <script type="module" src="print.js"></script>
+  </body>
+</html>

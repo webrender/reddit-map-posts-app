@@ -5,6 +5,7 @@
     {"path": "./src/client/"},
     {"path": "./src/server/"},
     {"path": "./src/shared/"},
+    {"path": "./src/site/"},
     {"path": "./src/test/"}
   ]
 }

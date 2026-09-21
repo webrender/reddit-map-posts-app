@@ -10,6 +10,7 @@
   "references": [
     {"path": "../client/"},
     {"path": "../server/"},
-    {"path": "../shared/"}
+    {"path": "../shared/"},
+    {"path": "../site/"}
   ]
 }

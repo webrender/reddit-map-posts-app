@@ -1,0 +1,9 @@
+// TypeScript config for the standalone print page.
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["DOM", "ES2023"],
+    "customConditions": ["browser"]
+  },
+  "references": [{"path": "../client/"}, {"path": "../shared/"}]
+}
